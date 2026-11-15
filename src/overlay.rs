@@ -16,7 +16,7 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -162,9 +162,36 @@ fn gfx() -> Option<Rc<Gfx>> {
     })
 }
 
-/// Releases the cached Direct2D / DirectWrite factories (the resident process calls this when idle).
+/// Releases the cached Direct2D / DirectWrite factories and everything they hold.
 pub fn release_graphics() {
     GFX.with(|g| *g.borrow_mut() = None);
+}
+
+/// Creates the factories and a throw-away render target once at startup, so the GPU device and
+/// driver are already loaded when the first capture starts (otherwise that costs ~150 ms).
+pub fn prewarm(hwnd: HWND) {
+    let Some(gfx) = gfx() else { return };
+    unsafe {
+        let props = D2D1_RENDER_TARGET_PROPERTIES {
+            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            usage: D2D1_RENDER_TARGET_USAGE_NONE,
+            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+        };
+        let hp = D2D1_HWND_RENDER_TARGET_PROPERTIES {
+            hwnd,
+            pixelSize: D2D_SIZE_U { width: 16, height: 16 },
+            presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
+        };
+        if let Ok(rt) = gfx.d2d.CreateHwndRenderTarget(&props, &hp) {
+            let base: ID2D1RenderTarget = rt.into();
+            let _ = gfx.font(14.0, false);
+            base.BeginDraw();
+            let _ = base.EndDraw(None, None);
+        }
+    }
 }
 
 fn register_class() {
@@ -186,15 +213,24 @@ pub fn start(params: Params) -> bool {
     if is_active() {
         return false;
     }
-    let Some(gfx) = gfx() else { return false };
+    let t0 = Instant::now();
+    let Some(gfx) = gfx() else {
+        crate::sys::log("gfx init failed");
+        return false;
+    };
     let monitors: Vec<Monitor> = capture::monitors();
     if monitors.is_empty() {
         return false;
     }
     let vrect = capture::virtual_rect(&monitors);
     // Grab first: nothing of ours is on screen yet.
-    let Some(cap) = capture::capture(vrect) else { return false };
+    let Some(cap) = capture::capture(vrect) else {
+        crate::sys::log("capture failed");
+        return false;
+    };
+    crate::sys::log(&format!("captured {}x{} in {:?}", vrect.w(), vrect.h(), t0.elapsed()));
     register_class();
+    crate::sys::log(&format!("gfx+capture ready {:?}", t0.elapsed()));
 
     let mut mons = Vec::new();
     unsafe {
@@ -221,6 +257,7 @@ pub fn start(params: Params) -> bool {
     if mons.is_empty() {
         return false;
     }
+    crate::sys::log(&format!("windows created {:?}", t0.elapsed()));
     let mut cursor = POINT::default();
     unsafe {
         let _ = GetCursorPos(&mut cursor);
@@ -257,6 +294,7 @@ pub fn start(params: Params) -> bool {
         let s = b.as_mut().unwrap();
         for i in 0..s.mons.len() {
             s.ensure_target(i);
+            crate::sys::log(&format!("target {i} {:?}", t0.elapsed()));
             s.paint(i);
         }
         unsafe {
@@ -270,6 +308,7 @@ pub fn start(params: Params) -> bool {
             let target = s.mons[front.unwrap_or(0)].hwnd;
             force_foreground(target);
         }
+        crate::sys::log(&format!("overlay shown after {:?}, {} windows", t0.elapsed(), s.mons.len()));
     });
     true
 }
@@ -296,6 +335,7 @@ pub fn cancel() {
 }
 
 fn finish(action: Action) {
+    crate::sys::log(&format!("finish {action:?}"));
     let Some(mut s) = SESSION.with(|c| c.try_borrow_mut().ok().and_then(|mut b| b.take())) else { return };
     unsafe {
         let _ = ReleaseCapture();
@@ -387,7 +427,7 @@ impl Session {
         unsafe {
             let props = D2D1_RENDER_TARGET_PROPERTIES {
                 r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_UNKNOWN, alphaMode: D2D1_ALPHA_MODE_IGNORE },
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
                 dpiX: 96.0,
                 dpiY: 96.0,
                 usage: D2D1_RENDER_TARGET_USAGE_NONE,
@@ -398,7 +438,13 @@ impl Session {
                 pixelSize: D2D_SIZE_U { width: mr.w() as u32, height: mr.h() as u32 },
                 presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
             };
-            let Ok(rt) = self.gfx.d2d.CreateHwndRenderTarget(&props, &hp) else { return };
+            let rt = match self.gfx.d2d.CreateHwndRenderTarget(&props, &hp) {
+                Ok(rt) => rt,
+                Err(e) => {
+                    crate::sys::log(&format!("CreateHwndRenderTarget failed: {e}"));
+                    return;
+                }
+            };
             let base: ID2D1RenderTarget = rt.clone().into();
             let bmp = base.CreateBitmap(
                 D2D_SIZE_U { width: mr.w() as u32, height: mr.h() as u32 },
@@ -407,6 +453,9 @@ impl Session {
                 &bitmap_props(),
             );
             let pen = Pen::new(&self.gfx, &base);
+            if let (Err(e), _) | (_, Err(e)) = (&bmp, &pen) {
+                crate::sys::log(&format!("bitmap/pen failed: {e}"));
+            }
             if let (Ok(bmp), Ok(pen)) = (bmp, pen) {
                 self.mons[i].rt = Some(rt);
                 self.mons[i].bmp = Some(bmp);
@@ -563,6 +612,7 @@ impl Session {
                 if inactive && self.started.elapsed().as_millis() > 700 {
                     let other = HWND(lp.0 as *mut _);
                     if !self.mons.iter().any(|m| m.hwnd == other) {
+                        crate::sys::log("deactivated");
                         *action = Some(Action::Cancel);
                     }
                 }
@@ -1027,7 +1077,9 @@ impl Session {
     fn paint(&mut self, i: usize) {
         let gfx = self.gfx.clone();
         let m = &self.mons[i];
-        let (Some(hrt), Some(bmp), Some(pen)) = (&m.rt, &m.bmp, &m.pen) else { return };
+        let (Some(hrt), Some(bmp), Some(pen)) = (&m.rt, &m.bmp, &m.pen) else {
+            return;
+        };
         let rt: &ID2D1RenderTarget = hrt;
         let mr = m.rect;
         let scale = m.scale;
@@ -1085,6 +1137,7 @@ impl Session {
             }
             rt.SetTransform(&windows_numerics_translate(0.0, 0.0));
             if let Err(e) = rt.EndDraw(None, None) {
+                crate::sys::log(&format!("EndDraw failed: {e}"));
                 if e.code().0 as u32 == 0x8899000C {
                     // render target lost: rebuild on the next paint
                     let m = &mut self.mons[i];

@@ -30,6 +30,7 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_UPDATE_DONE: u32 = WM_APP + 2;
 const HOTKEY_ID: i32 = 1;
 const TIMER_CAPTURE: usize = 1;
+const TIMER_PREWARM: usize = 2;
 const NIN_SELECT_: u32 = 0x400;
 const NIN_BALLOONUSERCLICK_: u32 = 0x405;
 
@@ -148,6 +149,7 @@ pub fn run() -> i32 {
                 start_update_check(s);
             }
         });
+        overlay::prewarm(hwnd);
         trim_memory();
 
         let mut msg = MSG::default();
@@ -174,6 +176,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_TIMER if wp.0 == TIMER_CAPTURE => {
             let _ = KillTimer(Some(hwnd), TIMER_CAPTURE);
             start_capture();
+            return LRESULT(0);
+        }
+        WM_TIMER if wp.0 == TIMER_PREWARM => {
+            let _ = KillTimer(Some(hwnd), TIMER_PREWARM);
+            if !overlay::is_active() {
+                overlay::prewarm(hwnd);
+                trim_memory();
+            }
             return LRESULT(0);
         }
         WM_TRAY => {
@@ -265,8 +275,14 @@ pub fn capture_done(d: Done) {
             Action::Cancel => {}
         }
     }
+    // Drop the GPU-side caches, then warm up again a moment later so the next capture is still fast.
     overlay::release_graphics();
     trim_memory();
+    if let Some(h) = with(|s| s.hwnd) {
+        unsafe {
+            let _ = SetTimer(Some(h), TIMER_PREWARM, 1500, None);
+        }
+    }
 }
 
 fn save_image(img: &files::Image) {

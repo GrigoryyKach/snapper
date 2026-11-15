@@ -142,3 +142,14 @@ pub fn open_folder(dir: &Path) {
 pub fn reveal_file(path: &Path) {
     let _ = Command::new("explorer.exe").arg(format!("/select,{}", path.display())).spawn();
 }
+
+/// Diagnostics: appends a line to `%APPDATA%\Snapper\snapper.log` when `SNAPPER_LOG` is set.
+pub fn log(msg: &str) {
+    if std::env::var_os("SNAPPER_LOG").is_none() {
+        return;
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(config::data_dir().join("snapper.log")) {
+        let _ = writeln!(f, "{msg}");
+    }
+}

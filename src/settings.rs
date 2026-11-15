@@ -2,7 +2,7 @@
 //! immediately: the config is saved and the resident process is signalled to reload it.
 
 use crate::config::{Config, Format};
-use crate::hotkey::{self, Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
+use crate::hotkey::{self, Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT};
 use crate::i18n::{self, Lang};
 use crate::nimvoro::{self, UpdateState, Updater};
 use crate::strings::{self, S};
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use windows::core::w;
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
+use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, SetForegroundWindow, ShowWindow, SW_RESTORE, WM_CLOSE};
 
 const TITLE: &str = "Snapper Settings";
@@ -105,18 +105,36 @@ impl App {
         }
     }
 
-    /// While recording: look at the keyboard directly (egui has no Print Screen key).
-    fn record_step(&mut self) {
-        if !key_pressed(0x1B) {
-            let Some(vk) = pressed_key() else { return };
-            let mods = current_mods();
-            let hk = Hotkey { mods, vk };
-            if mods == 0 && !hotkey::allowed_without_modifier(vk) {
-                self.hk_err = Some(HkErr::Unsupported);
+    /// While recording: the first key press in the window becomes the hotkey. (Print Screen only
+    /// reports a key release on Windows, so releases count for that key.)
+    fn record_step(&mut self, ctx: &egui::Context) {
+        let events = ctx.input(|i| i.events.clone());
+        for ev in events {
+            let egui::Event::Key { key, pressed, modifiers, repeat: false, .. } = ev else { continue };
+            if key == egui::Key::Escape {
                 self.recording = false;
                 return;
             }
+            let Some(vk) = key_to_vk(key) else { continue };
+            if !pressed && vk != hotkey::VK_SNAPSHOT {
+                continue;
+            }
+            let mut mods = 0;
+            if modifiers.ctrl {
+                mods |= MOD_CONTROL;
+            }
+            if modifiers.alt {
+                mods |= MOD_ALT;
+            }
+            if modifiers.shift {
+                mods |= MOD_SHIFT;
+            }
+            let hk = Hotkey { mods, vk };
             self.recording = false;
+            if mods == 0 && !hotkey::allowed_without_modifier(vk) {
+                self.hk_err = Some(HkErr::Unsupported);
+                return;
+            }
             let text = hk.format();
             if text == self.cfg.hotkey {
                 self.hk_err = None;
@@ -130,8 +148,7 @@ impl App {
             } else {
                 self.hk_err = Some(HkErr::Taken);
             }
-        } else {
-            self.recording = false;
+            return;
         }
     }
 
@@ -360,8 +377,8 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
         if self.recording {
-            self.record_step();
-            ctx.request_repaint_after(Duration::from_millis(30));
+            self.record_step(ctx);
+            ctx.request_repaint_after(Duration::from_millis(100));
         } else {
             ctx.request_repaint_after(Duration::from_millis(450));
         }
@@ -413,34 +430,21 @@ fn switch_row(ui: &mut Ui, p: &Pal, title: &str, hint: &str, value: &mut bool) -
     changed
 }
 
-// ───────────────────────── keyboard probing ─────────────────────────
+// ───────────────────────── hotkeys ─────────────────────────
 
-fn key_pressed(vk: u32) -> bool {
-    unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
-}
-
-fn current_mods() -> u32 {
-    let mut m = 0;
-    if key_pressed(0x11) {
-        m |= MOD_CONTROL;
-    }
-    if key_pressed(0x12) {
-        m |= MOD_ALT;
-    }
-    if key_pressed(0x10) {
-        m |= MOD_SHIFT;
-    }
-    if key_pressed(0x5B) || key_pressed(0x5C) {
-        m |= MOD_WIN;
-    }
-    m
-}
-
-/// First pressed non-modifier key that can serve as a hotkey.
-fn pressed_key() -> Option<u32> {
-    (0x08..=0xFEu32).find(|&vk| {
-        !matches!(vk, 0x10..=0x12 | 0x5B | 0x5C | 0xA0..=0xA5 | 0x1B) && key_pressed(vk) && hotkey::key_name(vk).is_some()
-    })
+/// Maps an egui key to a Windows virtual-key code through the shared hotkey names.
+fn key_to_vk(k: egui::Key) -> Option<u32> {
+    let n = format!("{k:?}");
+    let name = if let Some(d) = n.strip_prefix("Num").filter(|d| d.chars().all(|c| c.is_ascii_digit())) {
+        d.to_string()
+    } else if let Some(a) = n.strip_prefix("Arrow") {
+        a.to_string()
+    } else if n == "Backtick" {
+        "Tilde".to_string()
+    } else {
+        n
+    };
+    hotkey::key_from_name(&name)
 }
 
 fn hotkey_is_prtsc(s: &str) -> bool {
