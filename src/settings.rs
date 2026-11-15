@@ -37,7 +37,7 @@ pub fn run() -> eframe::Result<()> {
     let viewport = egui::ViewportBuilder::default()
         .with_title(TITLE)
         .with_app_id("local.snapper.settings")
-        .with_inner_size([500.0, 720.0])
+        .with_inner_size([500.0, 900.0])
         .with_min_inner_size([440.0, 560.0])
         .with_icon(std::sync::Arc::new(icon));
     let options = eframe::NativeOptions { viewport, centered: true, ..Default::default() };
@@ -401,7 +401,7 @@ impl eframe::App for App {
     }
 }
 
-// ───────────────────────── widgets ─────────────────────────
+// в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ widgets в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 fn key_chip(ui: &mut Ui, text: &str, active: bool, p: &Pal) {
     let font = theme::semi(13.0);
@@ -430,7 +430,7 @@ fn switch_row(ui: &mut Ui, p: &Pal, title: &str, hint: &str, value: &mut bool) -
     changed
 }
 
-// ───────────────────────── hotkeys ─────────────────────────
+// в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ hotkeys в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 /// Maps an egui key to a Windows virtual-key code through the shared hotkey names.
 fn key_to_vk(k: egui::Key) -> Option<u32> {

@@ -1,0 +1,52 @@
+name: Release
+
+# Builds the Windows binary and publishes a GitHub Release when a vX.Y.Z tag is pushed.
+# The NIMVORO launcher downloads Snapper-win-x64.zip from the release (name set in nimvoro.json).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version matches the tag
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          "VERSION=$v" >> $env:GITHUB_ENV
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$v") {
+            throw "Tag ${{ github.ref_name }} does not match version $v"
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pkg | Out-Null
+          Copy-Item target/release/Snapper.exe pkg/
+          Compress-Archive -Path pkg/* -DestinationPath Snapper-win-x64.zip -Force
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v') { $tag = "v$env:VERSION" }
+          gh release create $tag "Snapper-win-x64.zip" --title "Snapper $tag" --generate-notes --verify-tag

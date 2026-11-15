@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "id": "snapper",
+  "name": "Snapper",
+  "tagline": "Region screenshots from the tray",
+  "description": "Press a hotkey, every monitor darkens, drag a rectangle and you are done. Draw arrows, boxes and text on it, then copy it to the clipboard or save it. A single exe that lives in the tray and works offline.",
+  "features": [
+    {
+      "title": "Any area, any monitor",
+      "text": "Select a region that spans several monitors or all of them. Mixed DPI and monitors left of the primary one work."
+    },
+    {
+      "title": "Annotate on the spot",
+      "text": "Pencil, arrow, rectangle, filled rectangle and text with Cyrillic support, one colour picker for every tool, multi-level undo."
+    },
+    {
+      "title": "Copy or save in one key",
+      "text": "Ctrl+C puts the image on the clipboard in formats Discord, Telegram, browsers and Office all accept. Ctrl+S saves it to your folder."
+    },
+    {
+      "title": "Lives in the tray",
+      "text": "Global hotkey with a recorder, start with Windows, instant overlay, and almost no memory while idle."
+    }
+  ],
+  "category": "Productivity",
+  "accent": [
+    "#4f6bff",
+    "#8a5bff"
+  ],
+  "icon": "assets/icon.png",
+  "screenshots": [
+    "assets/screenshots/1.png",
+    "assets/screenshots/2.png",
+    "assets/screenshots/3.png",
+    "assets/screenshots/4.png"
+  ],
+  "exe": "Snapper.exe",
+  "asset": "Snapper-win-x64.zip",
+  "requirements": [
+    "Windows 10/11 x64"
+  ],
+  "settingsDir": "%APPDATA%\\Snapper",
+  "i18n": {
+    "ru": {
+      "tagline": "Скриншоты области экрана из трея",
+      "description": "Нажмите горячую клавишу, все мониторы затемнятся, выделите прямоугольник — и готово. Нарисуйте поверх стрелки, рамки и текст, затем скопируйте в буфер обмена или сохраните. Один exe в трее, работает офлайн.",
+      "category": "Продуктивность",
+      "features": [
+        {
+          "title": "Любая область, любые мониторы",
+          "text": "Выделяйте область, которая охватывает несколько мониторов или все сразу. Разный масштаб и мониторы слева от основного поддерживаются."
+        },
+        {
+          "title": "Пометки на месте",
+          "text": "Карандаш, стрелка, рамка, закрашенный прямоугольник и текст с кириллицей, один выбор цвета для всех инструментов, отмена в несколько шагов."
+        },
+        {
+          "title": "Копирование и сохранение одной клавишей",
+          "text": "Ctrl+C кладёт изображение в буфер в форматах, которые понимают Discord, Telegram, браузеры и Office. Ctrl+S сохраняет в вашу папку."
+        },
+        {
+          "title": "Живёт в трее",
+          "text": "Глобальная горячая клавиша с записью комбинации, запуск вместе с Windows, мгновенное появление и почти нулевое потребление памяти в покое."
+        }
+      ],
+      "requirements": [
+        "Windows 10/11 x64"
+      ]
+    },
+    "uk": {
+      "tagline": "Знімки області екрана з трея",
+      "description": "Натисніть гарячу клавішу, усі монітори затемняться, виділіть прямокутник — і готово. Намалюйте поверх стрілки, рамки й текст, потім скопіюйте в буфер обміну або збережіть. Один exe в треї, працює офлайн.",
+      "category": "Продуктивність",
+      "features": [
+        {
+          "title": "Будь-яка область, будь-які монітори",
+          "text": "Виділяйте область, що охоплює кілька моніторів або всі одразу. Різний масштаб і монітори ліворуч від основного підтримуються."
+        },
+        {
+          "title": "Позначки на місці",
+          "text": "Олівець, стрілка, рамка, зафарбований прямокутник і текст із кирилицею, один вибір кольору для всіх інструментів, скасування в кілька кроків."
+        },
+        {
+          "title": "Копіювання й збереження однією клавішею",
+          "text": "Ctrl+C кладе зображення в буфер у форматах, які розуміють Discord, Telegram, браузери та Office. Ctrl+S зберігає у вашу теку."
+        },
+        {
+          "title": "Живе в треї",
+          "text": "Глобальна гаряча клавіша із записом комбінації, запуск разом із Windows, миттєва поява та майже нульове споживання пам'яті у спокої."
+        }
+      ],
+      "requirements": [
+        "Windows 10/11 x64"
+      ]
+    }
+  }
+}

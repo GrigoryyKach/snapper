@@ -141,6 +141,20 @@ struct Session {
     high_surrogate: Option<u16>,
 }
 
+impl Drop for Session {
+    fn drop(&mut self) {
+        for m in &mut self.mons {
+            // release Direct2D objects before their window goes away
+            m.pen = None;
+            m.bmp = None;
+            m.rt = None;
+            unsafe {
+                let _ = DestroyWindow(m.hwnd);
+            }
+        }
+    }
+}
+
 thread_local! {
     static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
     static GFX: RefCell<Option<Rc<Gfx>>> = const { RefCell::new(None) };
