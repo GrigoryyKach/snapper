@@ -1,0 +1,50 @@
+[package]
+name = "snapper"
+version = "1.0.0"
+edition = "2021"
+build = "build.rs"
+description = "Snapper: a lightweight region screenshot tool that lives in the tray"
+
+[[bin]]
+name = "Snapper"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "clipboard", "links"] }
+rfd = "0.15.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+png = "0.17"
+windows-numerics = "0.3"
+jpeg-encoder = "0.6"
+windows = { version = "0.62", features = [
+    "Foundation_Numerics",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security",
+    "Win32_System_SystemInformation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

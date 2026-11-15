@@ -1,0 +1,553 @@
+//! Resident mode (default): hidden message window, tray icon and menu, global hotkey, and the
+//! hand-off to the capture overlay. A plain Win32 message loop: no eframe, so it stays small.
+//! The settings window is a separate process (`Snapper.exe --settings`) that signals this one
+//! through a registered window message after it saves the config.
+
+use crate::config::{self, Config};
+use crate::files;
+use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
+use crate::i18n::{self, Lang};
+use crate::nimvoro::{UpdateState, Updater};
+use crate::overlay::{self, Action, Done, Params};
+use crate::strings;
+use crate::sys::{self, wide};
+use crate::theme::ThemeMode;
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::process::Child;
+use windows::core::{w, PCSTR, PCWSTR};
+use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, SetProcessWorkingSetSize};
+use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
+use windows::Win32::UI::Shell::*;
+use windows::Win32::UI::WindowsAndMessaging::*;
+
+const WM_TRAY: u32 = WM_APP + 1;
+const WM_UPDATE_DONE: u32 = WM_APP + 2;
+const HOTKEY_ID: i32 = 1;
+const TIMER_CAPTURE: usize = 1;
+const NIN_SELECT_: u32 = 0x400;
+const NIN_BALLOONUSERCLICK_: u32 = 0x405;
+
+const ID_TAKE: usize = 1;
+const ID_SETTINGS: usize = 2;
+const ID_FOLDER: usize = 3;
+const ID_CHECK_NOW: usize = 10;
+const ID_CHECK_START: usize = 11;
+const ID_UPDATE: usize = 12;
+const ID_EXIT: usize = 99;
+
+#[derive(Clone)]
+enum BalloonKind {
+    None,
+    Saved(PathBuf),
+    Update,
+}
+
+struct State {
+    hwnd: HWND,
+    cfg: Config,
+    lang: Lang,
+    hotkey_ok: bool,
+    updater: Updater,
+    settings: Option<Child>,
+    balloon: BalloonKind,
+    msg_reload: u32,
+    msg_settings: u32,
+    msg_taskbar: u32,
+    announced_update: bool,
+}
+
+thread_local! {
+    static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+}
+
+fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
+    STATE.with(|s| s.try_borrow_mut().ok().and_then(|mut b| b.as_mut().map(f)))
+}
+
+pub fn run() -> i32 {
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // Single instance: a second launch just asks the first one to open Settings.
+        let mutex = CreateMutexW(None, true, w!("Local\\Snapper.Resident"));
+        if mutex.is_ok() && GetLastError() == ERROR_ALREADY_EXISTS {
+            if let Some(h) = sys::resident_window() {
+                let _ = PostMessageW(Some(h), sys::msg_show_settings(), WPARAM(0), LPARAM(0));
+            }
+            return 0;
+        }
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+
+        let first_run = !config::config_path().exists();
+        let mut cfg = Config::load();
+        let lang = i18n::resolve(cfg.language.as_deref());
+        if cfg.language.as_deref() != Some(lang.code()) {
+            cfg.language = Some(lang.code().to_string());
+            cfg.save();
+        }
+
+        let hinst = GetModuleHandleW(None).unwrap_or_default();
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(wndproc),
+            hInstance: hinst.into(),
+            lpszClassName: sys::RESIDENT_CLASS,
+            ..Default::default()
+        };
+        RegisterClassExW(&wc);
+        let Ok(hwnd) = CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            sys::RESIDENT_CLASS,
+            w!("Snapper"),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(hinst.into()),
+            None,
+        ) else {
+            return 1;
+        };
+
+        let updater = Updater::new("snapper", "GrigoryyKach/snapper", env!("CARGO_PKG_VERSION"));
+        let state = State {
+            hwnd,
+            cfg,
+            lang,
+            hotkey_ok: false,
+            updater,
+            settings: None,
+            balloon: BalloonKind::None,
+            msg_reload: sys::msg_reload(),
+            msg_settings: sys::msg_show_settings(),
+            msg_taskbar: RegisterWindowMessageW(w!("TaskbarCreated")),
+            announced_update: false,
+        };
+        STATE.with(|s| *s.borrow_mut() = Some(state));
+
+        apply_menu_theme();
+        add_tray();
+        register_hotkey(false);
+        if first_run {
+            with(|s| {
+                let t = strings::tr(s.lang);
+                let hk = s.cfg.hotkey.clone();
+                balloon(s, t.welcome_title, &t.welcome_body.replace("{hk}", &hk), BalloonKind::None);
+            });
+        }
+        with(|s| {
+            if s.cfg.check_updates {
+                start_update_check(s);
+            }
+        });
+        trim_memory();
+
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        0
+    }
+}
+
+fn trim_memory() {
+    unsafe {
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_HOTKEY => {
+            start_capture();
+            return LRESULT(0);
+        }
+        WM_TIMER if wp.0 == TIMER_CAPTURE => {
+            let _ = KillTimer(Some(hwnd), TIMER_CAPTURE);
+            start_capture();
+            return LRESULT(0);
+        }
+        WM_TRAY => {
+            let event = (lp.0 & 0xffff) as u32;
+            match event {
+                NIN_SELECT_ | WM_LBUTTONUP => {
+                    let _ = SetTimer(Some(hwnd), TIMER_CAPTURE, 60, None);
+                }
+                WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
+                NIN_BALLOONUSERCLICK_ => on_balloon_click(),
+                _ => {}
+            }
+            return LRESULT(0);
+        }
+        WM_UPDATE_DONE => {
+            with(|s| {
+                if let UpdateState::Available { version, .. } = s.updater.state() {
+                    if !s.announced_update {
+                        s.announced_update = true;
+                        let t = strings::tr(s.lang);
+                        let u = crate::nimvoro::strings(s.lang);
+                        balloon(s, t.update_title, &u.available.replace("{v}", &version), BalloonKind::Update);
+                    }
+                }
+            });
+            return LRESULT(0);
+        }
+        WM_ENDSESSION | WM_DESTROY => {
+            remove_tray(hwnd);
+            if msg == WM_DESTROY {
+                PostQuitMessage(0);
+            }
+        }
+        _ => {}
+    }
+    let (reload, show_settings, taskbar) = with(|s| (s.msg_reload, s.msg_settings, s.msg_taskbar)).unwrap_or((0, 0, 0));
+    if msg == reload && msg != 0 {
+        reload_config();
+        return LRESULT(0);
+    }
+    if msg == show_settings && msg != 0 {
+        open_settings();
+        return LRESULT(0);
+    }
+    if msg == taskbar && msg != 0 {
+        add_tray();
+        return LRESULT(0);
+    }
+    DefWindowProcW(hwnd, msg, wp, lp)
+}
+
+// ───────────────────────── capture ─────────────────────────
+
+fn start_capture() {
+    if overlay::is_active() {
+        return;
+    }
+    let Some((lang, color, stroke)) = with(|s| {
+        let color = config::parse_hex_color(&s.cfg.last_color).unwrap_or(0xff3b30);
+        (s.lang, color, s.cfg.last_stroke as usize)
+    }) else {
+        return;
+    };
+    overlay::start(Params { lang, color, stroke });
+}
+
+/// Called by the overlay when it closes.
+pub fn capture_done(d: Done) {
+    with(|s| {
+        // remember colour and stroke without clobbering settings changed meanwhile
+        let mut disk = Config::load();
+        let color = config::format_hex_color(d.color);
+        if disk.last_color != color || disk.last_stroke as usize != d.stroke {
+            disk.last_color = color;
+            disk.last_stroke = d.stroke as u8;
+            disk.save();
+        }
+        s.cfg.last_color = disk.last_color.clone();
+        s.cfg.last_stroke = disk.last_stroke;
+    });
+    if let Some(img) = &d.image {
+        match d.action {
+            Action::Copy => {
+                if crate::clipboard::copy_image(img).is_err() {
+                    with(|s| balloon(s, "Snapper", strings::tr(s.lang).copy_failed, BalloonKind::None));
+                }
+            }
+            Action::Save => save_image(img),
+            Action::Cancel => {}
+        }
+    }
+    overlay::release_graphics();
+    trim_memory();
+}
+
+fn save_image(img: &files::Image) {
+    let Some((cfg, lang)) = with(|s| (s.cfg.clone(), s.lang)) else { return };
+    let t = strings::tr(lang);
+    let dir = cfg.save_folder();
+    let result = (|| -> Result<PathBuf, String> {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let now = unsafe { GetLocalTime() };
+        let base = files::base_name(now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+        let path = files::unique_path(&dir, &base, cfg.format.ext(), |p| p.exists());
+        let data = files::encode(img, cfg.format)?;
+        std::fs::write(&path, data).map_err(|e| e.to_string())?;
+        Ok(path)
+    })();
+    match result {
+        Ok(path) => {
+            if cfg.copy_on_save {
+                let _ = crate::clipboard::copy_image(img);
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            with(|s| balloon(s, "Snapper", &t.saved.replace("{f}", &name), BalloonKind::Saved(path)));
+        }
+        Err(_) => {
+            with(|s| balloon(s, "Snapper", t.save_failed, BalloonKind::None));
+        }
+    }
+}
+
+fn on_balloon_click() {
+    let kind = with(|s| s.balloon.clone()).unwrap_or(BalloonKind::None);
+    match kind {
+        BalloonKind::Saved(p) => sys::reveal_file(&p),
+        BalloonKind::Update => {
+            if with(|s| s.updater.apply()).unwrap_or(false) {
+                quit();
+            }
+        }
+        BalloonKind::None => {}
+    }
+}
+
+// ───────────────────────── config / hotkey ─────────────────────────
+
+fn reload_config() {
+    with(|s| {
+        let mut cfg = Config::load();
+        let lang = i18n::resolve(cfg.language.as_deref());
+        if cfg.language.is_none() {
+            cfg.language = Some(lang.code().to_string());
+        }
+        s.cfg = cfg;
+        s.lang = lang;
+    });
+    apply_menu_theme();
+    update_tray_tip();
+    register_hotkey(true);
+}
+
+/// (Re)registers the configured hotkey and publishes the result for the settings window.
+fn register_hotkey(notify: bool) {
+    let Some((hwnd, text, lang)) = with(|s| (s.hwnd, s.cfg.hotkey.clone(), s.lang)) else { return };
+    unsafe {
+        let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
+    }
+    let hk = Hotkey::parse(&text).unwrap_or_default();
+    let mods = hk.mods & (MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN);
+    let ok = unsafe { RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(mods | 0x4000), hk.vk).is_ok() };
+    with(|s| s.hotkey_ok = ok);
+    sys::write_status(&text, ok);
+    update_tray_tip();
+    if !ok {
+        let t = strings::tr(lang);
+        let mut body = t.hk_failed_body.replace("{hk}", &hk.format());
+        if hk.vk == crate::hotkey::VK_SNAPSHOT && sys::prtsc_snipping_enabled() {
+            body.push_str(t.hk_prtsc_extra);
+        }
+        with(|s| balloon(s, t.hk_failed_title, &body, BalloonKind::None));
+    }
+    let _ = notify;
+}
+
+// ───────────────────────── tray ─────────────────────────
+
+fn copy_wide<const N: usize>(dst: &mut [u16; N], s: &str) {
+    let mut i = 0;
+    for c in s.encode_utf16() {
+        if i >= N - 1 {
+            break;
+        }
+        dst[i] = c;
+        i += 1;
+    }
+    dst[i] = 0;
+}
+
+fn tray_icon() -> HICON {
+    unsafe {
+        let hinst = GetModuleHandleW(None).unwrap_or_default();
+        let cx = GetSystemMetrics(SM_CXSMICON);
+        let cy = GetSystemMetrics(SM_CYSMICON);
+        if let Ok(h) = LoadImageW(Some(hinst.into()), PCWSTR(1usize as *const u16), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR) {
+            return HICON(h.0);
+        }
+        LoadIconW(None, IDI_APPLICATION).unwrap_or_default()
+    }
+}
+
+fn nid(hwnd: HWND) -> NOTIFYICONDATAW {
+    NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: 1, ..Default::default() }
+}
+
+fn tip_text() -> String {
+    with(|s| strings::tr(s.lang).tray_tip.replace("{hk}", &s.cfg.hotkey)).unwrap_or_else(|| "Snapper".into())
+}
+
+fn add_tray() {
+    let Some(hwnd) = with(|s| s.hwnd) else { return };
+    let mut n = nid(hwnd);
+    n.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    n.uCallbackMessage = WM_TRAY;
+    n.hIcon = tray_icon();
+    copy_wide(&mut n.szTip, &tip_text());
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_ADD, &n);
+        n.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+        let _ = Shell_NotifyIconW(NIM_SETVERSION, &n);
+    }
+}
+
+fn update_tray_tip() {
+    let Some(hwnd) = with(|s| s.hwnd) else { return };
+    let mut n = nid(hwnd);
+    n.uFlags = NIF_TIP | NIF_SHOWTIP;
+    copy_wide(&mut n.szTip, &tip_text());
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &n);
+    }
+}
+
+fn remove_tray(hwnd: HWND) {
+    let n = nid(hwnd);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_DELETE, &n);
+    }
+}
+
+fn balloon(s: &mut State, title: &str, text: &str, kind: BalloonKind) {
+    s.balloon = kind;
+    let mut n = nid(s.hwnd);
+    n.uFlags = NIF_INFO;
+    n.dwInfoFlags = NIIF_INFO;
+    copy_wide(&mut n.szInfoTitle, title);
+    copy_wide(&mut n.szInfo, text);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &n);
+    }
+}
+
+/// Dark / light popup menus through the (undocumented but stable) uxtheme ordinals 135 and 136.
+fn apply_menu_theme() {
+    let mode = with(|s| s.cfg.theme).unwrap_or(ThemeMode::System);
+    unsafe {
+        let Ok(lib) = LoadLibraryW(w!("uxtheme.dll")) else { return };
+        let set = GetProcAddress(lib, PCSTR(135usize as *const u8));
+        let flush = GetProcAddress(lib, PCSTR(136usize as *const u8));
+        if let Some(set) = set {
+            let set: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(set);
+            set(match mode {
+                ThemeMode::System => 1, // AllowDark: follows the system setting
+                ThemeMode::Dark => 2,   // ForceDark
+                ThemeMode::Light => 3,  // ForceLight
+            });
+        }
+        if let Some(flush) = flush {
+            let flush: unsafe extern "system" fn() = std::mem::transmute(flush);
+            flush();
+        }
+    }
+}
+
+fn show_menu(hwnd: HWND) {
+    apply_menu_theme();
+    let Some((lang, hotkey, check_start, state, status)) =
+        with(|s| (s.lang, s.cfg.hotkey.clone(), s.cfg.check_updates, s.updater.state(), s.updater.status_text(s.lang)))
+    else {
+        return;
+    };
+    let t = strings::tr(lang);
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let Ok(updates) = CreatePopupMenu() else { return };
+        let item = |m: HMENU, flags: MENU_ITEM_FLAGS, id: usize, text: &str| {
+            let w = wide(text);
+            let _ = AppendMenuW(m, flags, id, PCWSTR(w.as_ptr()));
+        };
+        item(menu, MF_STRING, ID_TAKE, &format!("{}\t{}", t.tray_take, hotkey));
+        item(menu, MF_STRING, ID_SETTINGS, t.tray_settings);
+        item(menu, MF_STRING, ID_FOLDER, t.tray_folder);
+        // Updates submenu
+        item(updates, MF_STRING | MF_GRAYED, 0, &status);
+        if let UpdateState::Available { version, .. } = &state {
+            item(updates, MF_STRING, ID_UPDATE, &t.tray_update_to.replace("{v}", version));
+        }
+        let _ = AppendMenuW(updates, MF_SEPARATOR, 0, PCWSTR::null());
+        item(updates, MF_STRING, ID_CHECK_NOW, t.tray_check_now);
+        item(updates, if check_start { MF_STRING | MF_CHECKED } else { MF_STRING }, ID_CHECK_START, t.tray_check_start);
+        let w = wide(t.tray_updates);
+        let _ = AppendMenuW(menu, MF_POPUP, updates.0 as usize, PCWSTR(w.as_ptr()));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        item(menu, MF_STRING, ID_EXIT, t.tray_exit);
+
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let _ = SetForegroundWindow(hwnd);
+        let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, Some(0), hwnd, None);
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        match cmd.0 as usize {
+            ID_TAKE => {
+                let _ = SetTimer(Some(hwnd), TIMER_CAPTURE, 200, None);
+            }
+            ID_SETTINGS => open_settings(),
+            ID_FOLDER => {
+                if let Some(dir) = with(|s| s.cfg.save_folder()) {
+                    sys::open_folder(&dir);
+                }
+            }
+            ID_CHECK_NOW => {
+                with(|s| {
+                    s.announced_update = false;
+                    start_update_check(s);
+                });
+            }
+            ID_CHECK_START => {
+                with(|s| {
+                    let mut disk = Config::load();
+                    disk.check_updates = !check_start;
+                    disk.save();
+                    s.cfg.check_updates = disk.check_updates;
+                });
+            }
+            ID_UPDATE => {
+                if with(|s| s.updater.apply()).unwrap_or(false) {
+                    quit();
+                }
+            }
+            ID_EXIT => quit(),
+            _ => {}
+        }
+    }
+}
+
+fn start_update_check(s: &mut State) {
+    let h = s.hwnd.0 as isize;
+    s.updater.check(move || unsafe {
+        let _ = PostMessageW(Some(HWND(h as *mut _)), WM_UPDATE_DONE, WPARAM(0), LPARAM(0));
+    });
+}
+
+fn open_settings() {
+    with(|s| {
+        if let Some(child) = &mut s.settings {
+            if matches!(child.try_wait(), Ok(None)) {
+                // already running: the settings process focuses its own window when launched again
+            } else {
+                s.settings = None;
+            }
+        }
+        let Ok(exe) = std::env::current_exe() else { return };
+        if let Ok(child) = std::process::Command::new(exe).arg("--settings").spawn() {
+            s.settings = Some(child);
+        }
+    });
+}
+
+fn quit() {
+    overlay::cancel();
+    if let Some(h) = with(|s| s.hwnd) {
+        unsafe {
+            let _ = DestroyWindow(h);
+        }
+    }
+}
