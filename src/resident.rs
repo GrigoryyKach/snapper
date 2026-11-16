@@ -47,6 +47,8 @@ enum BalloonKind {
     None,
     Saved(PathBuf),
     Update,
+    /// Opens the settings window (hotkey problems).
+    Settings,
 }
 
 struct State {
@@ -321,6 +323,7 @@ fn on_balloon_click() {
                 quit();
             }
         }
+        BalloonKind::Settings => open_settings(),
         BalloonKind::None => {}
     }
 }
@@ -360,7 +363,7 @@ fn register_hotkey(notify: bool) {
         if hk.vk == crate::hotkey::VK_SNAPSHOT && sys::prtsc_snipping_enabled() {
             body.push_str(t.hk_prtsc_extra);
         }
-        with(|s| balloon(s, t.hk_failed_title, &body, BalloonKind::None));
+        with(|s| balloon(s, t.hk_failed_title, &body, BalloonKind::Settings));
     }
     let _ = notify;
 }

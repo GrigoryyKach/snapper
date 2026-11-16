@@ -7,7 +7,7 @@ use crate::i18n::{self, Lang};
 use crate::nimvoro::{self, UpdateState, Updater};
 use crate::strings::{self, S};
 use crate::sys;
-use crate::theme::{self, Btn, Pal, Textures};
+use crate::theme::{self, Btn, Pal};
 use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, ScrollArea, Ui};
 use std::time::{Duration, Instant};
 use windows::core::w;
@@ -54,11 +54,13 @@ enum HkErr {
 struct App {
     cfg: Config,
     lang: Lang,
-    tex: Textures,
+    logo: egui::TextureHandle,
     updater: Updater,
     autostart: bool,
     recording: bool,
     hk_err: Option<HkErr>,
+    /// Hotkey text of the last rejected attempt (to show the Print Screen hint).
+    hk_err_for: String,
     status: Option<sys::HotkeyStatus>,
     resident: bool,
     last_poll: Instant,
@@ -76,11 +78,12 @@ impl App {
         Self {
             cfg,
             lang,
-            tex: Textures::new(&cc.egui_ctx),
+            logo: load_logo(&cc.egui_ctx),
             updater,
             autostart: sys::autostart_enabled(),
             recording: false,
             hk_err: None,
+            hk_err_for: String::new(),
             status: sys::read_status(),
             resident: sys::resident_window().is_some(),
             last_poll: Instant::now(),
@@ -129,33 +132,38 @@ impl App {
             if modifiers.shift {
                 mods |= MOD_SHIFT;
             }
-            let hk = Hotkey { mods, vk };
             self.recording = false;
-            if mods == 0 && !hotkey::allowed_without_modifier(vk) {
-                self.hk_err = Some(HkErr::Unsupported);
-                return;
-            }
-            let text = hk.format();
-            if text == self.cfg.hotkey {
-                self.hk_err = None;
-                return;
-            }
-            if try_register(&hk) {
-                self.hk_err = None;
-                self.cfg.hotkey = text;
-                self.status = None;
-                self.apply();
-            } else {
-                self.hk_err = Some(HkErr::Taken);
-            }
+            self.set_hotkey(Hotkey { mods, vk });
             return;
+        }
+    }
+
+    /// Validates `hk` by registering it, then saves and applies it, or shows a clear error.
+    fn set_hotkey(&mut self, hk: Hotkey) {
+        let text = hk.format();
+        self.hk_err_for = text.clone();
+        if hk.mods == 0 && !hotkey::allowed_without_modifier(hk.vk) {
+            self.hk_err = Some(HkErr::Unsupported);
+            return;
+        }
+        if text == self.cfg.hotkey {
+            self.hk_err = None;
+            return;
+        }
+        if try_register(&hk) {
+            self.hk_err = None;
+            self.cfg.hotkey = text;
+            self.status = None;
+            self.apply();
+        } else {
+            self.hk_err = Some(HkErr::Taken);
         }
     }
 
     fn header(&self, ui: &mut Ui, p: &Pal) {
         let t = self.s();
         ui.horizontal(|ui| {
-            theme::logo(ui, 36.0, "\u{2702}", &self.tex);
+            ui.add(egui::Image::new((self.logo.id(), egui::vec2(36.0, 36.0))));
             ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.add_space(1.0);
@@ -221,6 +229,7 @@ impl App {
         } else if let Some(e) = self.hk_err {
             (
                 match e {
+                    HkErr::Taken if hotkey_is_prtsc(&self.hk_err_for) => t.hk_prtsc_warn.to_string(),
                     HkErr::Taken => t.hk_taken.to_string(),
                     HkErr::Unsupported => t.hk_unsupported.to_string(),
                 },
@@ -242,6 +251,17 @@ impl App {
             }
         };
         ui.label(RichText::new(text).font(theme::reg(12.5)).color(color));
+        ui.add_space(4.0);
+        ui.label(RichText::new(t.quick_pick).font(theme::reg(12.0)).color(p.muted));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            for (label, mods) in [("Print Screen", 0), ("Ctrl+Print Screen", MOD_CONTROL), ("Shift+Print Screen", MOD_SHIFT), ("Alt+Print Screen", MOD_ALT)] {
+                if theme::button(ui, label, Btn::Ghost, p).clicked() {
+                    self.recording = false;
+                    self.set_hotkey(Hotkey { mods, vk: hotkey::VK_SNAPSHOT });
+                }
+            }
+        });
         if self.cfg.hotkey != "PrintScreen" {
             ui.add_space(2.0);
             if theme::button(ui, t.reset, Btn::Link, p).clicked() {
@@ -470,4 +490,12 @@ fn close_resident() {
         std::thread::sleep(Duration::from_millis(400));
     }
     let _: Option<HWND> = None;
+}
+
+/// The real app icon (assets/icon.png) for the header, pre-scaled so it stays crisp at 36 px.
+fn load_logo(ctx: &egui::Context) -> egui::TextureHandle {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png")).expect("icon.png");
+    let img = img.resize_exact(144, 144, image::imageops::FilterType::Lanczos3).to_rgba8();
+    let color = egui::ColorImage::from_rgba_unmultiplied([144, 144], img.as_raw());
+    ctx.load_texture("snapper-logo", color, egui::TextureOptions::LINEAR)
 }

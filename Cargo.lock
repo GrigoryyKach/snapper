@@ -2486,6 +2486,7 @@ name = "snapper"
 version = "1.0.0"
 dependencies = [
  "eframe",
+ "image",
  "jpeg-encoder",
  "png 0.17.16",
  "rfd",
