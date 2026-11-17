@@ -118,3 +118,7 @@ A `vX.Y.Z` tag runs `.github/workflows/release.yml`, which tests, builds and pub
 ## Screenshots
 
 See `assets/screenshots/`.
+
+## Support
+
+If you find this app useful, you can support its development: <https://donatello.to/MicsGame>

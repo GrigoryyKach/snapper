@@ -6,6 +6,7 @@ use crate::hotkey::{self, Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT};
 use crate::i18n::{self, Lang};
 use crate::nimvoro::{self, UpdateState, Updater};
 use crate::strings::{self, S};
+use crate::support;
 use crate::sys;
 use crate::theme::{self, Btn, Pal};
 use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, ScrollArea, Ui};
@@ -376,6 +377,12 @@ impl App {
         ui.add_space(8.0);
     }
 
+    fn support_block(&mut self, ui: &mut Ui, p: &Pal) {
+        theme::divider(ui, p);
+        support::support_section(ui, self.lang);
+        ui.add_space(4.0);
+    }
+
     fn about_section(&mut self, ui: &mut Ui, p: &Pal) {
         let t = self.s();
         theme::divider(ui, p);
@@ -415,6 +422,7 @@ impl eframe::App for App {
                 self.saving_section(ui, &p);
                 self.system_section(ui, &p);
                 self.interface_section(ui, &p);
+                self.support_block(ui, &p);
                 self.about_section(ui, &p);
             });
         });

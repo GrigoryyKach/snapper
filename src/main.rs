@@ -22,6 +22,7 @@ mod render;
 mod resident;
 mod settings;
 mod strings;
+mod support;
 mod sys;
 #[allow(dead_code)]
 mod theme;

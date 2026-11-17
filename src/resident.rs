@@ -8,6 +8,7 @@ use crate::files;
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::i18n::{self, Lang};
 use crate::nimvoro::{UpdateState, Updater};
+use crate::support;
 use crate::overlay::{self, Action, Done, Params};
 use crate::strings;
 use crate::sys::{self, wide};
@@ -40,6 +41,7 @@ const ID_FOLDER: usize = 3;
 const ID_CHECK_NOW: usize = 10;
 const ID_CHECK_START: usize = 11;
 const ID_UPDATE: usize = 12;
+const ID_SUPPORT: usize = 90;
 const ID_EXIT: usize = 99;
 
 #[derive(Clone)]
@@ -496,6 +498,8 @@ fn show_menu(hwnd: HWND) {
         let w = wide(t.tray_updates);
         let _ = AppendMenuW(menu, MF_POPUP, updates.0 as usize, PCWSTR(w.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        item(menu, MF_STRING, ID_SUPPORT, support::tray_label(lang));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         item(menu, MF_STRING, ID_EXIT, t.tray_exit);
 
         let mut pt = POINT::default();
@@ -533,6 +537,7 @@ fn show_menu(hwnd: HWND) {
                     quit();
                 }
             }
+            ID_SUPPORT => support::open(),
             ID_EXIT => quit(),
             _ => {}
         }
