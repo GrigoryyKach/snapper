@@ -2,6 +2,7 @@
 
 use crate::i18n::{Lang, Table};
 
+#[allow(dead_code)]
 pub struct S {
     // overlay toolbar tooltips
     pub t_move: &'static str,
@@ -69,6 +70,13 @@ pub struct S {
     pub version: &'static str,
     pub project_page: &'static str,
     pub resident_off: &'static str,
+    pub autostart_lnx: &'static str,
+    pub autostart_hint_lnx: &'static str,
+    pub wl_title: &'static str,
+    pub wl_text: &'static str,
+    pub wl_copy: &'static str,
+    pub wl_copied: &'static str,
+    pub capture_failed: &'static str,
 }
 
 const EN: S = S {
@@ -134,6 +142,13 @@ const EN: S = S {
     version: "Version",
     project_page: "Project on GitHub",
     resident_off: "Snapper is not running in the tray, so changes apply on its next start.",
+    autostart_lnx: "Start when you log in",
+    autostart_hint_lnx: "Launch Snapper in the tray when your session starts",
+    wl_title: "Hotkey on Wayland",
+    wl_text: "Wayland does not let apps register global hotkeys. Bind a system shortcut (GNOME: Settings > Keyboard > Custom Shortcuts; KDE: System Settings > Shortcuts > Custom Shortcuts) to this command:",
+    wl_copy: "Copy command",
+    wl_copied: "Copied",
+    capture_failed: "Could not capture the screen",
 };
 
 const RU: S = S {
@@ -199,6 +214,13 @@ const RU: S = S {
     version: "Версия",
     project_page: "Проект на GitHub",
     resident_off: "Snapper не запущен в трее, поэтому изменения применятся при его следующем запуске.",
+    autostart_lnx: "Запускать при входе в систему",
+    autostart_hint_lnx: "Запускать Snapper в трее после входа в сеанс",
+    wl_title: "Горячая клавиша в Wayland",
+    wl_text: "Wayland не позволяет программам занимать глобальные горячие клавиши. Привяжите системное сочетание (GNOME: Параметры > Клавиатура > Свои сочетания; KDE: Системные параметры > Быстрые клавиши > Свои сочетания) к этой команде:",
+    wl_copy: "Копировать команду",
+    wl_copied: "Скопировано",
+    capture_failed: "Не удалось сделать снимок экрана",
 };
 
 const UK: S = S {
@@ -264,6 +286,13 @@ const UK: S = S {
     version: "Версія",
     project_page: "Проєкт на GitHub",
     resident_off: "Snapper не запущено в треї, тому зміни застосуються під час його наступного запуску.",
+    autostart_lnx: "Запускати під час входу в систему",
+    autostart_hint_lnx: "Запускати Snapper у треї після входу в сеанс",
+    wl_title: "Гаряча клавіша у Wayland",
+    wl_text: "Wayland не дозволяє програмам займати глобальні гарячі клавіші. Прив'яжіть системну комбінацію (GNOME: Параметри > Клавіатура > Власні скорочення; KDE: Системні параметри > Скорочення > Власні скорочення) до цієї команди:",
+    wl_copy: "Копіювати команду",
+    wl_copied: "Скопійовано",
+    capture_failed: "Не вдалося зробити знімок екрана",
 };
 
 static TABLE: Table<S> = Table { en: &EN, ru: &RU, uk: &UK };

@@ -42,6 +42,7 @@ impl Rect {
     pub fn union(&self, o: &Rect) -> Rect {
         rect(self.l.min(o.l), self.t.min(o.t), self.r.max(o.r), self.b.max(o.b))
     }
+    #[allow(dead_code)]
     pub fn inflate(&self, d: i32) -> Rect {
         rect(self.l - d, self.t - d, self.r + d, self.b + d)
     }

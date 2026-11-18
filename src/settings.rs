@@ -11,18 +11,29 @@ use crate::sys;
 use crate::theme::{self, Btn, Pal};
 use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, ScrollArea, Ui};
 use std::time::{Duration, Instant};
+#[cfg(windows)]
 use windows::core::w;
+#[cfg(windows)]
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, WPARAM};
+#[cfg(windows)]
 use windows::Win32::System::Threading::CreateMutexW;
+#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, SetForegroundWindow, ShowWindow, SW_RESTORE, WM_CLOSE};
 
 const TITLE: &str = "Snapper Settings";
 const REPO_URL: &str = "https://github.com/GrigoryyKach/snapper";
+#[cfg(windows)]
 const TEST_HOTKEY_ID: i32 = 0x5A5A;
 
 pub fn run() -> eframe::Result<()> {
     // Only one settings window: a second launch focuses the first.
+    #[cfg(unix)]
+    if !single_instance() {
+        return Ok(());
+    }
+    #[cfg(windows)]
     unsafe {
         let m = CreateMutexW(None, true, w!("Local\\Snapper.Settings"));
         if m.is_ok() && GetLastError() == ERROR_ALREADY_EXISTS {
@@ -65,6 +76,8 @@ struct App {
     status: Option<sys::HotkeyStatus>,
     resident: bool,
     last_poll: Instant,
+    #[cfg(unix)]
+    copied: Option<Instant>,
 }
 
 impl App {
@@ -88,6 +101,8 @@ impl App {
             status: sys::read_status(),
             resident: sys::resident_window().is_some(),
             last_poll: Instant::now(),
+            #[cfg(unix)]
+            copied: None,
         }
     }
 
@@ -204,6 +219,47 @@ impl App {
         let t = self.s();
         theme::caps(ui, t.sec_capture, p);
         ui.add_space(2.0);
+        #[cfg(unix)]
+        if sys::is_wayland() {
+            self.wayland_block(ui, p);
+        } else {
+            self.hotkey_rows(ui, p);
+        }
+        #[cfg(windows)]
+        self.hotkey_rows(ui, p);
+        self.format_rows(ui, p);
+    }
+
+    /// Wayland: apps cannot grab keys, so show the command to bind to a system shortcut.
+    #[cfg(unix)]
+    fn wayland_block(&mut self, ui: &mut Ui, p: &Pal) {
+        let t = self.s();
+        ui.label(RichText::new(t.wl_title).font(theme::reg(14.0)).color(p.text));
+        ui.add_space(-4.0);
+        theme::hint(ui, t.wl_text, p);
+        if self.resident && self.status.as_ref().is_some_and(|st| st.ok && st.hotkey == self.cfg.hotkey) {
+            ui.add_space(2.0);
+            ui.label(RichText::new(t.hk_ok).font(theme::reg(12.5)).color(Color32::from_rgb(0x2f, 0xa8, 0x5f)));
+        }
+        ui.add_space(4.0);
+        let cmd = sys::capture_command();
+        ui.horizontal(|ui| {
+            Frame::new().fill(p.bg).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(9.0).inner_margin(Margin::symmetric(10, 7)).show(ui, |ui| {
+                ui.set_width((ui.available_width() - 150.0).max(80.0));
+                ui.add(egui::Label::new(RichText::new(&cmd).font(egui::FontId::monospace(12.5)).color(p.text)).selectable(true).wrap());
+            });
+            let copied = self.copied.is_some_and(|c| c.elapsed() < Duration::from_secs(2));
+            let label = if copied { t.wl_copied } else { t.wl_copy };
+            if theme::button(ui, label, Btn::Soft, p).clicked() {
+                ui.ctx().copy_text(cmd.clone());
+                self.copied = Some(Instant::now());
+            }
+        });
+        ui.add_space(10.0);
+    }
+
+    fn hotkey_rows(&mut self, ui: &mut Ui, p: &Pal) {
+        let t = self.s();
         let w = ui.available_width();
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -274,6 +330,10 @@ impl App {
         }
         ui.add_space(10.0);
 
+    }
+
+    fn format_rows(&mut self, ui: &mut Ui, p: &Pal) {
+        let t = self.s();
         // format
         ui.horizontal(|ui| {
             ui.label(RichText::new(t.format).font(theme::reg(14.0)).color(p.text));
@@ -330,7 +390,11 @@ impl App {
         theme::caps(ui, t.sec_system, p);
         ui.add_space(2.0);
         let mut auto = self.autostart;
-        if switch_row(ui, p, t.autostart, t.autostart_hint, &mut auto) && auto != self.autostart {
+        #[cfg(windows)]
+        let (a_title, a_hint) = (t.autostart, t.autostart_hint);
+        #[cfg(unix)]
+        let (a_title, a_hint) = (t.autostart_lnx, t.autostart_hint_lnx);
+        if switch_row(ui, p, a_title, a_hint, &mut auto) && auto != self.autostart {
             if sys::set_autostart(auto) {
                 self.autostart = auto;
                 self.cfg.autostart = auto;
@@ -480,6 +544,7 @@ fn hotkey_is_prtsc(s: &str) -> bool {
 }
 
 /// Validates a combination by trying to register it for this thread, then releasing it.
+#[cfg(windows)]
 fn try_register(hk: &Hotkey) -> bool {
     unsafe {
         let ok = RegisterHotKey(None, TEST_HOTKEY_ID, HOT_KEY_MODIFIERS(hk.mods | 0x4000), hk.vk).is_ok();
@@ -490,6 +555,7 @@ fn try_register(hk: &Hotkey) -> bool {
     }
 }
 
+#[cfg(windows)]
 fn close_resident() {
     if let Some(h) = sys::resident_window() {
         unsafe {
@@ -498,6 +564,32 @@ fn close_resident() {
         std::thread::sleep(Duration::from_millis(400));
     }
     let _: Option<HWND> = None;
+}
+
+#[cfg(unix)]
+fn try_register(hk: &Hotkey) -> bool {
+    crate::resident::can_register(hk)
+}
+
+#[cfg(unix)]
+fn close_resident() {
+    if sys::send("quit") {
+        std::thread::sleep(Duration::from_millis(400));
+    }
+}
+
+/// One settings window per session: an exclusive lock on a file in the data folder.
+#[cfg(unix)]
+fn single_instance() -> bool {
+    let dir = crate::config::data_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let Ok(f) = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("settings.lock")) else { return true };
+    if f.try_lock().is_ok() {
+        std::mem::forget(f); // held until the process exits
+        true
+    } else {
+        false
+    }
 }
 
 /// The real app icon (assets/icon.png) for the header, pre-scaled so it stays crisp at 36 px.

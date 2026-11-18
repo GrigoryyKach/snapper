@@ -14,25 +14,8 @@ use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 
-pub type Pf = (f32, f32);
-
-/// Stroke widths in physical pixels: thin, medium, thick.
-pub const STROKES: [f32; 3] = [3.0, 5.0, 9.0];
-/// Text sizes (pixels) matching the stroke steps.
-pub const TEXT_SIZES: [f32; 3] = [20.0, 28.0, 40.0];
-
-#[derive(Clone, Debug)]
-pub enum Ann {
-    Pen { pts: Vec<Pf>, color: u32, w: f32 },
-    Arrow { a: Pf, b: Pf, color: u32, w: f32 },
-    Rect { r: (f32, f32, f32, f32), color: u32, w: f32 },
-    Fill { r: (f32, f32, f32, f32), color: u32 },
-    Text { pos: Pf, text: String, color: u32, size: f32 },
-}
-
-pub fn norm_rect(a: Pf, b: Pf) -> (f32, f32, f32, f32) {
-    (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
-}
+pub use crate::ann::{norm_rect, Ann, Pf, STROKES, TEXT_SIZES};
+use crate::ann::arrow_head_len;
 
 pub fn colorf(rgb: u32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r: ((rgb >> 16) & 0xff) as f32 / 255.0, g: ((rgb >> 8) & 0xff) as f32 / 255.0, b: (rgb & 0xff) as f32 / 255.0, a }
@@ -156,10 +139,6 @@ fn pen_path(gfx: &Gfx, pts: &[Pf]) -> Result<ID2D1PathGeometry> {
         sink.Close()?;
         Ok(g)
     }
-}
-
-pub fn arrow_head_len(w: f32) -> f32 {
-    (w * 4.0).max(14.0)
 }
 
 fn arrow_geometry(gfx: &Gfx, a: Pf, b: Pf, w: f32) -> Option<(Pf, ID2D1PathGeometry)> {

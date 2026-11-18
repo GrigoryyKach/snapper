@@ -63,7 +63,11 @@ pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("SNAPPER_DATA_DIR") {
         return PathBuf::from(d);
     }
+    #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    // $XDG_CONFIG_HOME or ~/.config
+    #[cfg(unix)]
+    let base = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
     base.join("Snapper")
 }
 
@@ -115,8 +119,15 @@ impl Config {
     }
 }
 
+#[cfg(windows)]
 pub fn default_save_dir() -> PathBuf {
     std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Pictures").join("Snapper")
+}
+
+/// `~/Pictures/Snapper`, following the XDG pictures folder when the user has one.
+#[cfg(unix)]
+pub fn default_save_dir() -> PathBuf {
+    dirs::picture_dir().or_else(|| dirs::home_dir().map(|h| h.join("Pictures"))).unwrap_or_else(std::env::temp_dir).join("Snapper")
 }
 
 /// Parses `#rrggbb` (or `rrggbb`) into `0xRRGGBB`.

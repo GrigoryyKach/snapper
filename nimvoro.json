@@ -3,7 +3,7 @@
   "id": "snapper",
   "name": "Snapper",
   "tagline": "Region screenshots from the tray",
-  "description": "Press a hotkey, every monitor darkens, drag a rectangle and you are done. Draw arrows, boxes and text on it, then copy it to the clipboard or save it. A single exe that lives in the tray and works offline.",
+  "description": "Press a hotkey, every monitor darkens, drag a rectangle and you are done. Draw arrows, boxes and text on it, then copy it to the clipboard or save it. A single executable for Windows and Linux (X11 and Wayland) that lives in the tray and works offline.",
   "features": [
     {
       "title": "Any area, any monitor",
@@ -19,7 +19,7 @@
     },
     {
       "title": "Lives in the tray",
-      "text": "Global hotkey with a recorder, start with Windows, instant overlay, and almost no memory while idle."
+      "text": "Global hotkey with a recorder, start with the system, instant overlay, and almost no memory while idle."
     }
   ],
   "category": "Productivity",
@@ -36,6 +36,15 @@
   ],
   "exe": "Snapper.exe",
   "asset": "Snapper-win-x64.zip",
+  "platforms": [
+    "windows",
+    "linux"
+  ],
+  "linux": {
+    "asset": "Snapper-linux-x64.tar.gz",
+    "exe": "snapper",
+    "requirements": "Linux x86_64 (X11 or Wayland) with GTK 3 (libgtk-3-0), libxdo3 and libayatana-appindicator3 for the tray icon (GNOME also needs the AppIndicator extension); wl-clipboard is recommended on Wayland"
+  },
   "requirements": [
     "Windows 10/11 x64"
   ],
@@ -43,7 +52,7 @@
   "i18n": {
     "ru": {
       "tagline": "Скриншоты области экрана из трея",
-      "description": "Нажмите горячую клавишу, все мониторы затемнятся, выделите прямоугольник — и готово. Нарисуйте поверх стрелки, рамки и текст, затем скопируйте в буфер обмена или сохраните. Один exe в трее, работает офлайн.",
+      "description": "Нажмите горячую клавишу, все мониторы затемнятся, выделите прямоугольник — и готово. Нарисуйте поверх стрелки, рамки и текст, затем скопируйте в буфер обмена или сохраните. Один исполняемый файл для Windows и Linux (X11 и Wayland), живёт в трее, работает офлайн.",
       "category": "Продуктивность",
       "features": [
         {
@@ -60,16 +69,19 @@
         },
         {
           "title": "Живёт в трее",
-          "text": "Глобальная горячая клавиша с записью комбинации, запуск вместе с Windows, мгновенное появление и почти нулевое потребление памяти в покое."
+          "text": "Глобальная горячая клавиша с записью комбинации, запуск вместе с системой, мгновенное появление и почти нулевое потребление памяти в покое."
         }
       ],
       "requirements": [
         "Windows 10/11 x64"
-      ]
+      ],
+      "linux": {
+        "requirements": "Linux x86_64 (X11 или Wayland) с GTK 3 (libgtk-3-0), libxdo3 и libayatana-appindicator3 для значка в трее (в GNOME нужно расширение AppIndicator); в Wayland рекомендуется wl-clipboard"
+      }
     },
     "uk": {
       "tagline": "Знімки області екрана з трея",
-      "description": "Натисніть гарячу клавішу, усі монітори затемняться, виділіть прямокутник — і готово. Намалюйте поверх стрілки, рамки й текст, потім скопіюйте в буфер обміну або збережіть. Один exe в треї, працює офлайн.",
+      "description": "Натисніть гарячу клавішу, усі монітори затемняться, виділіть прямокутник — і готово. Намалюйте поверх стрілки, рамки й текст, потім скопіюйте в буфер обміну або збережіть. Один виконуваний файл для Windows і Linux (X11 і Wayland), живе в треї, працює офлайн.",
       "category": "Продуктивність",
       "features": [
         {
@@ -86,12 +98,15 @@
         },
         {
           "title": "Живе в треї",
-          "text": "Глобальна гаряча клавіша із записом комбінації, запуск разом із Windows, миттєва поява та майже нульове споживання пам'яті у спокої."
+          "text": "Глобальна гаряча клавіша із записом комбінації, запуск разом із системою, миттєва поява та майже нульове споживання пам'яті у спокої."
         }
       ],
       "requirements": [
         "Windows 10/11 x64"
-      ]
+      ],
+      "linux": {
+        "requirements": "Linux x86_64 (X11 або Wayland) з GTK 3 (libgtk-3-0), libxdo3 і libayatana-appindicator3 для значка в треї (у GNOME потрібне розширення AppIndicator); у Wayland рекомендовано wl-clipboard"
+      }
     }
   }
 }
