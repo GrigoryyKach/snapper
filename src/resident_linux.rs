@@ -13,10 +13,7 @@ use crate::files;
 use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::i18n::{self, Lang};
 use crate::nimvoro::{UpdateState, Updater};
-use crate::geom::Rect;
-use crate::overlay::{self, Action, Done, Mode};
-use crate::scroll_linux;
-use crate::scrollcore;
+use crate::overlay::{self, Action, Done};
 use crate::strings;
 use crate::support;
 use crate::sys;
@@ -35,8 +32,6 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 #[derive(Debug, PartialEq)]
 pub enum Msg {
     Capture,
-    /// Scrolling capture (X11 only).
-    Scroll,
     Settings,
     Reload,
     Quit,
@@ -45,7 +40,6 @@ pub enum Msg {
 pub fn parse_msg(s: &str) -> Option<Msg> {
     match s {
         "capture" => Some(Msg::Capture),
-        "scroll" => Some(Msg::Scroll),
         "settings" => Some(Msg::Settings),
         "reload" => Some(Msg::Reload),
         "quit" => Some(Msg::Quit),
@@ -191,18 +185,10 @@ fn spawn_portal_shortcut(tx: Sender<Msg>, trigger: String, hotkey_text: String) 
 struct Job {
     child: Child,
     dir: PathBuf,
-    /// Root-window position of the picture's top-left corner (for a scrolling-capture selection).
-    origin: (i32, i32),
-}
-
-/// A running scrolling capture.
-struct ScrollJob {
-    shared: Arc<scrollcore::Shared>,
 }
 
 struct Items {
     take: MenuItem,
-    scroll: MenuItem,
     settings: MenuItem,
     folder: MenuItem,
     updates: Submenu,
@@ -223,11 +209,8 @@ struct State {
     settings: Option<Child>,
     manager: Option<GlobalHotKeyManager>,
     hotkey: Option<HotKey>,
-    scroll_hotkey: Option<HotKey>,
     job: Option<Job>,
-    scroll: Option<ScrollJob>,
     pending: Option<Instant>,
-    pending_scroll: Option<Instant>,
     items: Items,
     _tray: Option<TrayIcon>,
     rx: Receiver<Msg>,
@@ -270,7 +253,6 @@ pub fn run(capture_on_start: bool) -> i32 {
     let menu = Menu::new();
     let items = Items {
         take: MenuItem::new(t.tray_take, true, None),
-        scroll: MenuItem::new(t.t_scroll, true, None),
         settings: MenuItem::new(t.tray_settings, true, None),
         folder: MenuItem::new(t.tray_folder, true, None),
         updates: Submenu::new(t.tray_updates, true),
@@ -282,12 +264,8 @@ pub fn run(capture_on_start: bool) -> i32 {
         exit: MenuItem::new(t.tray_exit, true, None),
     };
     let _ = items.updates.append_items(&[&items.status, &items.update_to, &PredefinedMenuItem::separator(), &items.check_now, &items.check_start]);
-    let _ = menu.append_items(&[&items.take]);
-    if !sys::is_wayland() {
-        // scrolling capture needs synthetic wheel input: not available on Wayland
-        let _ = menu.append_items(&[&items.scroll]);
-    }
     let _ = menu.append_items(&[
+        &items.take,
         &items.settings,
         &items.folder,
         &items.updates,
@@ -315,10 +293,7 @@ pub fn run(capture_on_start: bool) -> i32 {
         settings: None,
         manager: None,
         hotkey: None,
-        scroll_hotkey: None,
         job: None,
-        scroll: None,
-        pending_scroll: None,
         pending: if capture_on_start { Some(Instant::now() + Duration::from_millis(300)) } else { None },
         items,
         _tray: tray,
@@ -353,7 +328,6 @@ pub fn run(capture_on_start: bool) -> i32 {
 
 struct Ids {
     take: MenuId,
-    scroll: MenuId,
     settings: MenuId,
     folder: MenuId,
     update_to: MenuId,
@@ -367,7 +341,6 @@ impl Ids {
     fn of(i: &Items) -> Ids {
         Ids {
             take: i.take.id().clone(),
-            scroll: i.scroll.id().clone(),
             settings: i.settings.id().clone(),
             folder: i.folder.id().clone(),
             update_to: i.update_to.id().clone(),
@@ -396,11 +369,6 @@ fn poll(s: &mut State, ids: &mut Ids) -> bool {
     while let Ok(m) = s.rx.try_recv() {
         match m {
             Msg::Capture => s.pending = Some(Instant::now() + Duration::from_millis(150)),
-            Msg::Scroll => {
-                if !sys::is_wayland() {
-                    s.pending_scroll = Some(Instant::now() + Duration::from_millis(150));
-                }
-            }
             Msg::Settings => open_settings(s),
             Msg::Reload => reload_config(s),
             Msg::Quit => return false,
@@ -410,16 +378,11 @@ fn poll(s: &mut State, ids: &mut Ids) -> bool {
         if ev.state == HotKeyState::Pressed && s.hotkey.is_some_and(|h| h.id() == ev.id) {
             s.pending = Some(Instant::now());
         }
-        if ev.state == HotKeyState::Pressed && s.scroll_hotkey.is_some_and(|h| h.id() == ev.id) {
-            s.pending_scroll = Some(Instant::now());
-        }
     }
     while let Ok(ev) = MenuEvent::receiver().try_recv() {
         let id = ev.id;
         if id == ids.take {
             s.pending = Some(Instant::now() + Duration::from_millis(350)); // let the menu close first
-        } else if id == ids.scroll {
-            s.pending_scroll = Some(Instant::now() + Duration::from_millis(350));
         } else if id == ids.settings {
             open_settings(s);
         } else if id == ids.folder {
@@ -444,14 +407,9 @@ fn poll(s: &mut State, ids: &mut Ids) -> bool {
     }
     if s.pending.is_some_and(|t| Instant::now() >= t) {
         s.pending = None;
-        start_capture(s, Mode::Normal);
-    }
-    if s.pending_scroll.is_some_and(|t| Instant::now() >= t) {
-        s.pending_scroll = None;
-        start_capture(s, Mode::Scroll);
+        start_capture(s);
     }
     poll_job(s);
-    poll_scroll(s);
     refresh_update_items(s);
     if s.update_flag.swap(false, Ordering::SeqCst) {
         if let UpdateState::Available { version, .. } = s.updater.state() {
@@ -522,7 +480,6 @@ fn reload_config(s: &mut State) {
     s.lang = lang;
     let t = strings::tr(lang);
     s.items.take.set_text(t.tray_take);
-    s.items.scroll.set_text(t.t_scroll);
     s.items.settings.set_text(t.tray_settings);
     s.items.folder.set_text(t.tray_folder);
     s.items.updates.set_text(t.tray_updates);
@@ -552,24 +509,6 @@ fn register_hotkey(s: &mut State) {
         }
         return;
     }
-    if let (Some(m), Some(h)) = (&s.manager, s.scroll_hotkey.take()) {
-        let _ = m.unregister(h);
-    }
-    if let Some(shk) = Hotkey::parse(&s.cfg.scroll_hotkey).and_then(|h| to_global(&h)) {
-        if s.manager.is_none() {
-            s.manager = GlobalHotKeyManager::new().map_err(|e| sys::log(&format!("hotkey manager: {e}"))).ok();
-        }
-        if let Some(m) = &s.manager {
-            match m.register(shk) {
-                Ok(()) => s.scroll_hotkey = Some(shk),
-                Err(e) => {
-                    sys::log(&format!("scroll hotkey {}: {e}", s.cfg.scroll_hotkey));
-                    let t = strings::tr(s.lang);
-                    notify(t.hk_failed_title, &t.hk_failed_body.replace("{hk}", &s.cfg.scroll_hotkey), None);
-                }
-            }
-        }
-    }
     let hk = Hotkey::parse(&text).unwrap_or_default();
     let ok = (|| {
         let g = to_global(&hk)?;
@@ -598,8 +537,8 @@ fn work_dir() -> PathBuf {
     base.join(format!("snapper-cap-{}-{}", std::process::id(), JOB_SEQ.fetch_add(1, Ordering::SeqCst)))
 }
 
-fn start_capture(s: &mut State, mode: Mode) {
-    if s.job.is_some() || s.scroll.is_some() {
+fn start_capture(s: &mut State) {
+    if s.job.is_some() {
         return;
     }
     let t = strings::tr(s.lang);
@@ -624,14 +563,10 @@ fn start_capture(s: &mut State, mode: Mode) {
         notify("Snapper", t.capture_failed, None);
         return;
     }
-    let origin = shot.origin;
     drop(shot);
-    if mode == Mode::Scroll {
-        let _ = std::fs::write(overlay::mode_file(&dir), "scroll");
-    }
     let Some(exe) = sys::exe_path() else { return };
     match Command::new(exe).arg("--overlay").arg(&dir).spawn() {
-        Ok(child) => s.job = Some(Job { child, dir, origin }),
+        Ok(child) => s.job = Some(Job { child, dir }),
         Err(e) => {
             sys::log(&format!("cannot start the overlay: {e}"));
             let _ = std::fs::remove_dir_all(&dir);
@@ -647,65 +582,10 @@ fn poll_job(s: &mut State) {
     let job = s.job.take().unwrap();
     let done = overlay::read_result(&job.dir);
     let _ = std::fs::remove_dir_all(&job.dir);
-    capture_done(s, done, job.origin);
+    capture_done(s, done);
 }
 
-/// Starts the scrolling capture of the selection chosen in the overlay.
-fn start_scroll(s: &mut State, area: Rect, origin: (i32, i32)) {
-    let area = area.offset(origin.0, origin.1);
-    let shared = scroll_linux::spawn(area, s.cfg.scroll_max_height as usize);
-    s.scroll = Some(ScrollJob { shared });
-    let t = strings::tr(s.lang);
-    notify("Snapper", &format!("{}: {}", t.t_scroll, t.scroll_stop), None);
-}
-
-/// When the worker is done: say what happened and open the stitched picture in the viewer.
-fn poll_scroll(s: &mut State) {
-    if !s.scroll.as_ref().is_some_and(|j| j.shared.done.load(Ordering::Acquire)) {
-        return;
-    }
-    let job = s.scroll.take().unwrap();
-    let Some(outcome) = job.shared.outcome.lock().ok().and_then(|mut o| o.take()) else { return };
-    let t = strings::tr(s.lang);
-    let rows = outcome.image.as_ref().map_or(0, |i| i.h);
-    let note = match outcome.note {
-        scrollcore::Note::None => None,
-        scrollcore::Note::Limit => Some(t.scroll_limit.replace("{h}", &rows.to_string())),
-        scrollcore::Note::NoMatch => Some(t.scroll_nomatch.to_string()),
-        scrollcore::Note::Nothing => Some(t.scroll_nothing.to_string()),
-        scrollcore::Note::Failed => Some(t.scroll_failed.to_string()),
-    };
-    if let Some(n) = note {
-        notify("Snapper", &n, None);
-    }
-    let Some(img) = outcome.image else { return };
-    let dir = work_dir();
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        if std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).is_err() {
-            notify("Snapper", t.scroll_failed, None);
-            return;
-        }
-    }
-    let (w, h) = (img.w as i32, img.h as i32);
-    let shot = crate::capture::Shot { rect: crate::geom::rect(0, 0, w, h), monitors: vec![crate::geom::rect(0, 0, w, h)], bgra: img.bgra, origin: (0, 0) };
-    if std::fs::write(dir.join("cap.raw"), crate::capture::encode_shot(&shot)).is_err() || std::fs::write(overlay::mode_file(&dir), "view").is_err() {
-        let _ = std::fs::remove_dir_all(&dir);
-        notify("Snapper", t.scroll_failed, None);
-        return;
-    }
-    drop(shot);
-    let Some(exe) = sys::exe_path() else { return };
-    match Command::new(exe).arg("--overlay").arg(&dir).spawn() {
-        Ok(child) => s.job = Some(Job { child, dir, origin: (0, 0) }),
-        Err(e) => {
-            sys::log(&format!("cannot start the viewer: {e}"));
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-    }
-}
-
-fn capture_done(s: &mut State, d: Done, origin: (i32, i32)) {
+fn capture_done(s: &mut State, d: Done) {
     // remember colour and stroke without clobbering settings changed meanwhile
     let mut disk = Config::load();
     let color = config::format_hex_color(d.color);
@@ -716,12 +596,6 @@ fn capture_done(s: &mut State, d: Done, origin: (i32, i32)) {
     }
     s.cfg.last_color = disk.last_color;
     s.cfg.last_stroke = disk.last_stroke;
-    if d.action == Action::Scroll {
-        if let Some(area) = d.rect {
-            start_scroll(s, area, origin);
-        }
-        return;
-    }
     let Some(img) = &d.image else { return };
     let t = strings::tr(s.lang);
     match d.action {
@@ -731,7 +605,7 @@ fn capture_done(s: &mut State, d: Done, origin: (i32, i32)) {
             }
         }
         Action::Save => save_image(s, img),
-        Action::Cancel | Action::Scroll => {}
+        Action::Cancel => {}
     }
 }
 
@@ -799,7 +673,6 @@ mod tests {
     fn messages_parse() {
         assert_eq!(parse_msg("capture"), Some(Msg::Capture));
         assert_eq!(parse_msg("settings"), Some(Msg::Settings));
-        assert_eq!(parse_msg("scroll"), Some(Msg::Scroll));
         assert_eq!(parse_msg("rm -rf"), None);
     }
 

@@ -44,9 +44,9 @@ mod resident;
 #[path = "resident_linux.rs"]
 mod resident;
 mod settings;
-mod scrollcore;
-#[cfg(unix)]
-mod scroll_linux;
+#[cfg(windows)]
+mod manual;
+#[cfg(windows)]
 mod stitch;
 mod strings;
 mod support;

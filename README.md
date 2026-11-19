@@ -66,7 +66,7 @@ cargo build --release
 | Text | Click, type (Unicode and IME work, Cyrillic included), `Enter` or a click elsewhere commits, `Shift+Enter` adds a line, `Esc` cancels only that text |
 | Colour | 10 presets plus a HEX field; three stroke widths (also set the text size). The choice is remembered and applies to every tool |
 | Undo | Multi-level (`Ctrl+Z`, redo with `Ctrl+Y`) |
-| Scrolling capture | Scroll the selected area and stitch one tall image (not on Wayland) |
+| Scrolling capture (Windows) | Start a scrolling capture of the selected area |
 | Copy / Save / Close | `Ctrl+C` / `Ctrl+S` / `Esc` |
 
 ### Keys
@@ -95,41 +95,53 @@ Files are named `Snapper_YYYY-MM-DD_HH-mm-ss.png` (a numeric suffix is added on 
 `%USERPROFILE%\Pictures\Snapper` (`~/Pictures/Snapper` on Linux) unless you pick another folder in Settings. Format is PNG, or JPG at quality 90.
 After saving a notification shows "Saved: ..."; clicking it opens Explorer with the file selected (the folder, on Linux).
 
-## Scrolling capture
+## Scrolling capture (Windows only)
 
-Captures a long page, or any scrollable content, as one tall image.
+Captures a long page, or any scrollable content, as one tall image. **You scroll; Snapper watches and stitches.** The screen stays fully
+usable the whole time.
 
 1. Start it from the **Scrolling capture** button in the overlay toolbar (after selecting an area), from the tray menu, or with the optional
-   hotkey you set in Settings (empty by default). From the tray menu or the hotkey you then drag the area; it starts when you let go.
-2. Select the scrollable part, for example the browser viewport. Leaving the page's scrollbar out gives the cleanest result.
-3. Snapper grabs the area, sends mouse-wheel input to its right edge (so a link tooltip does not end up in the frames), waits until the
-   content stops moving, and grabs again. A small bar outside the area shows the frames and the height with a **Stop** button; **Esc** stops too.
-4. It stops at the end of the page, at the height limit (`scroll_max_height`, 30,000 px by default), on Esc or Stop, or when the frames stop
-   matching (an animation or a video); in that case what was stitched so far is kept and a notice says so.
-5. The result opens in a viewer with the usual tools, copy and save. It is shown 1:1 (fitted to the width if wider than the screen) and
-   scrolls with the wheel, the arrow, Page Up/Down, Home and End keys, or by dragging with the Move tool. Copy and save use the full resolution.
+   hotkey you set in Settings (empty by default). From the tray or the hotkey you drag the area first, then press **Start** (or Enter).
+2. The selection overlay closes. A thin frame with crop marks stays around the area (outside it, so it is never in the picture) and a small bar
+   shows the live height and frame count, with **Done** and **Cancel**. The frame is click-through and the bar never takes focus: scroll, click
+   and type in the page as usual, inside the area and outside it.
+3. Scroll the page. Snapper samples the area every 70 ms, skips identical samples and appends new rows only from a stable view.
+4. **Done** (the button, **Ctrl+Shift+Enter**, or the scrolling-capture hotkey pressed again) opens the result in the viewer; **Cancel** (the
+   button or **Ctrl+Shift+Backspace**) discards it. Esc is not used, because you are busy browsing. If the page window closes, press Done to keep
+   what was captured.
+5. The result opens in the viewer with the usual tools, copy and save, at full resolution. It is shown 1:1 (fitted to the width if wider than the
+   screen) and scrolls with the wheel, the arrow, Page Up/Down, Home and End keys, or by dragging with the Move tool.
 
-**Stitching** (`src/stitch.rs`, covered by unit tests): each row of a frame is hashed (pixels lightly quantised, a possible scrollbar strip on
-the right ignored) and the scroll distance is the shift at which most non-blank rows of two frames are equal; if no shift matches exactly (browsers
-scroll by fractions of a pixel and redraw text a little differently) a tolerant comparison of per-row luma buckets is tried. Only the new strip
-is appended. **Fixed headers and footers** (rows identical at the same position in both frames, such as sticky headers and cookie bars) are left out
-of the search: the header stays once at the top, the footer of the last frame is added once at the bottom.
+**Stitching** (`src/manual.rs`, row signatures in `src/stitch.rs`, covered by unit tests): the canvas is a list of *pages* (segments) and a pointer
+remembers where the last frame sat. Each frame is located near the pointer first by row hashes (pixels lightly quantised, a possible scrollbar strip
+on the right ignored), with a tolerant luma comparison for fractional scrolling nearby; then anywhere in its page, then in the other pages, by exact
+rows only.
 
-Limitations: only the page area you select is scrolled, so pages with their own scroll containers need the selection over that container;
-floating elements that cover only part of the width (a "back to top" button, a chat bubble) are copied wherever they happen to be in a frame;
-videos and animations stop the capture; the page's own scrollbar thumb is not stitched specially; windows of elevated programs ignore the
-synthetic wheel input from a non-elevated Snapper. On Linux the feature is X11 only (XTest wheel events and `GetImage`): it is not available on Wayland, so the button, the tray item and the hotkey are hidden there. On Linux there is no Stop bar, only Esc.
+- Below the captured rows: only the new strip is appended. Scrolling up, or back down over captured rows: the pointer moves and nothing is added,
+  so nothing is duplicated.
+- **Fixed headers and footers** (rows identical at the same place in consecutive frames, or equal to the top of the page) are left out of the
+  comparison; the header stays once at the top, the footer of the last frame is added once at the bottom.
+- **Pagination:** a frame that fits nowhere (you clicked "2") waits until the view is stable (about 0.4 s), then starts a new page. Leading rows
+  that equal the top of an earlier page (the site header, the search box) are dropped, the page is joined where its own rows begin, and blank or
+  half-loaded frames are never appended. Going back to an earlier page adds nothing; scrolling further down an unfinished page extends that page.
+- Limits: `scroll_max_height` (30,000 px by default) and 40 pages. The result is cut there and a notice says so.
+
+Limitations: only the selected area is watched, so pages with their own scroll containers need the selection over that container; scrolling
+past the top of what was captured does not add rows above it; floating elements that cover only part of the width (a "back to top" button, a chat
+bubble) are copied wherever they happen to be in a frame; video and animation inside the area are stitched as they look when stable; pages that
+differ only slightly, or look alike, can be confused when the content is very repetitive; the page's own scrollbar column is not stitched specially.
+Scrolling capture is **not available on Linux** (X11 or Wayland) in this version: the button, tray item, hotkey and settings row are absent there.
 
 ## Tray
 
-On Windows left click starts a capture and right click opens a menu (on Linux the menu opens on any click, as AppIndicator trays do): Take screenshot, Scrolling capture (X11 and Windows), Settings, Open screenshots folder, Updates
+On Windows left click starts a capture and right click opens a menu (on Linux the menu opens on any click, as AppIndicator trays do): Take screenshot, Scrolling capture (Windows), Settings, Open screenshots folder, Updates
 (check now, check on startup) and Exit. The menu follows the chosen theme.
 
 ## Settings
 
 Right-click the tray icon, then **Settings** (or start `Snapper.exe` a second time). Changes apply immediately, no restart.
 
-- **Capture:** hotkey recorder with a live status, the optional scrolling-capture hotkey, format (PNG/JPG), "Also copy to clipboard when saving".
+- **Capture:** hotkey recorder with a live status, the optional scrolling-capture hotkey (Windows), format (PNG/JPG), "Also copy to clipboard when saving".
 - **Saving:** screenshots folder with Browse and Open.
 - **System:** Start with Windows (a `HKCU\...\Run` value that reflects the real registry state), check for updates.
   On Linux the switch is "Start when you log in" (`~/.config/autostart/snapper.desktop`).

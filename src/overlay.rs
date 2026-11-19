@@ -68,6 +68,8 @@ enum Btn {
     Tool(Tool),
     Color,
     Scroll,
+    /// Starts the scrolling capture (the scrolling-capture overlay has only this and Close).
+    Start,
     Undo,
     Copy,
     Save,
@@ -393,7 +395,7 @@ pub fn start_view(params: Params, img: Image, near: Rect) -> bool {
     };
     let Ok(hwnd) = hwnd else { return false };
     let s = m.scale();
-    let (_, th) = toolbar_size(s, true);
+    let (_, th) = toolbar_size(s, Kit::Viewer);
     let band = th + 2 * (10.0 * s).round() as i32;
     let vp = rect(m.rect.l, m.rect.t + band, m.rect.r, m.rect.b);
     let (iw, ih) = (img.w as i32, img.h as i32);
@@ -683,10 +685,11 @@ impl Session {
             self.popover = None;
             return;
         }
-        let places: Vec<Place> = self.mons.iter().map(|m| Place { rect: m.rect, toolbar: toolbar_size(m.scale, false) }).collect();
+        let kit = if self.scroll_mode { Kit::Start } else { Kit::Full };
+        let places: Vec<Place> = self.mons.iter().map(|m| Place { rect: m.rect, toolbar: toolbar_size(m.scale, kit) }).collect();
         let gap = (12.0 * self.scale_at(pt(sel.r - 1, sel.b - 1))) as i32;
         if let Some((r, mon)) = place_toolbar(&sel, &places, gap) {
-            self.tb = Some(build_toolbar(r, mon, self.mons[mon].scale, false));
+            self.tb = Some(build_toolbar(r, mon, self.mons[mon].scale, kit));
         }
         self.popover = if self.popover_open { self.tb.as_ref().map(|tb| build_popover(tb, self.mons[tb.mon].rect)) } else { None };
     }
@@ -745,7 +748,7 @@ impl Session {
             }
             WM_LBUTTONUP => {
                 let p = self.point_of(hwnd, lp);
-                self.on_up(p, action);
+                self.on_up(p);
                 Some(LRESULT(0))
             }
             WM_MOUSEWHEEL => {
@@ -986,15 +989,11 @@ impl Session {
         }
     }
 
-    fn on_up(&mut self, p: Pt, action: &mut Option<Action>) {
+    fn on_up(&mut self, p: Pt) {
         let Some(op) = self.op else { return };
         self.on_move(p);
         unsafe {
             let _ = ReleaseCapture();
-        }
-        if self.scroll_mode && matches!(op, Op::Select { .. }) && self.sel.is_some_and(|r| r.w() >= 40 && r.h() >= 40) {
-            *action = Some(Action::Scroll);
-            return;
         }
         self.mutate(|s| {
             s.op = None;
@@ -1039,7 +1038,7 @@ impl Session {
                 s.popover_open = !s.popover_open;
                 s.hex_focus = false;
             }),
-            Btn::Scroll => *action = Some(Action::Scroll),
+            Btn::Scroll | Btn::Start => *action = Some(Action::Scroll),
             Btn::Undo => self.mutate(|s| s.undo()),
             Btn::Copy => *action = Some(Action::Copy),
             Btn::Save => *action = Some(Action::Save),
@@ -1093,7 +1092,7 @@ impl Session {
                 } else if self.hex_focus {
                     self.mutate(|s| s.hex_focus = false);
                 } else if self.sel.is_some() && self.op.is_none() {
-                    *action = Some(Action::Copy);
+                    *action = Some(if self.scroll_mode { Action::Scroll } else { Action::Copy });
                 }
             }
             VK_BACK => {
@@ -1313,12 +1312,12 @@ impl Session {
         self.sel = Some(disp);
         let m = &self.mons[0];
         let s = m.scale;
-        let (tw, th) = toolbar_size(s, true);
+        let (tw, th) = toolbar_size(s, Kit::Viewer);
         let pad = (10.0 * s).round() as i32;
         let x = m.rect.l + (m.rect.w() - tw) / 2;
         let y = m.rect.t + pad;
         let mr = m.rect;
-        self.tb = Some(build_toolbar(rect(x, y, x + tw, y + th), 0, s, true));
+        self.tb = Some(build_toolbar(rect(x, y, x + tw, y + th), 0, s, Kit::Viewer));
         self.popover = if self.popover_open { self.tb.as_ref().map(|tb| build_popover(tb, mr)) } else { None };
     }
 
@@ -1533,7 +1532,12 @@ impl Session {
 
     unsafe fn draw_label(&self, gfx: &Gfx, rt: &ID2D1RenderTarget, pen: &Pen, sel: &Rect, scale: f32) {
         let size = format!("{} \u{00d7} {}", sel.w(), sel.h());
-        let text = if self.scroll_mode { format!("{}  \u{00b7}  {}", strings::tr(self.lang).t_scroll, size) } else { size };
+        let text = if self.scroll_mode {
+            let t = strings::tr(self.lang);
+            format!("{}  \u{00b7}  {}  \u{00b7}  {}", t.t_scroll, size, t.scroll_hint_start)
+        } else {
+            size
+        };
         let fs = 12.5 * scale;
         let (tw, th) = gfx.measure_mono(&text, fs);
         let (pw, ph) = (8.0 * scale, 4.0 * scale);
@@ -1566,7 +1570,9 @@ impl Session {
         rt.DrawRoundedRectangle(&inset, b, 1.0, None);
         // separator
         b.SetColor(&colorf(BAR_LINE, 1.0));
-        rt.DrawLine(p2((tb.sep_x as f32 + 0.5, tb.rect.t as f32 + 12.0 * s)), p2((tb.sep_x as f32 + 0.5, tb.rect.b as f32 - 12.0 * s)), b, 1.0, None);
+        if tb.sep_x > tb.rect.l {
+            rt.DrawLine(p2((tb.sep_x as f32 + 0.5, tb.rect.t as f32 + 12.0 * s)), p2((tb.sep_x as f32 + 0.5, tb.rect.b as f32 - 12.0 * s)), b, 1.0, None);
+        }
         for (btn, r) in &tb.buttons {
             let active = *btn == Btn::Tool(self.tool);
             let hover = self.hover == Some(*btn);
@@ -1648,6 +1654,10 @@ impl Session {
                 b.SetColor(&colorf(0xffffff, 1.0));
                 rt.DrawEllipse(&D2D1_ELLIPSE { point: c, radiusX: 8.0 * k, radiusY: 8.0 * k }, b, lw, None);
             }
+            Btn::Start => {
+                b.SetColor(&colorf(ACCENT, 1.0));
+                tri((8.0, 5.0), (8.0, 19.0), (19.5, 12.0));
+            }
             Btn::Scroll => {
                 line((7.0, 4.0), (17.0, 4.0), lw);
                 line((12.0, 4.5), (12.0, 18.5), lw);
@@ -1704,6 +1714,7 @@ impl Session {
             Btn::Tool(Tool::Text) => t.t_text,
             Btn::Color => t.t_color,
             Btn::Scroll => t.t_scroll,
+            Btn::Start => t.scroll_start,
             Btn::Undo => t.t_undo,
             Btn::Copy => t.t_copy,
             Btn::Save => t.t_save,
@@ -1827,8 +1838,20 @@ fn resize_cursor(h: Handle) -> PCWSTR {
 
 // ───────────────────────── toolbar geometry ─────────────────────────
 
+/// Which toolbar: the full one, the viewer's, or the Start / Close pair of a scrolling capture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kit {
+    Full,
+    Viewer,
+    Start,
+}
+
 /// Toolbar layout; `None` is the separator. The scrolling-capture button is left out in the viewer.
-fn items(viewer: bool) -> Vec<Option<Btn>> {
+fn items(kit: Kit) -> Vec<Option<Btn>> {
+    if kit == Kit::Start {
+        return vec![Some(Btn::Start), Some(Btn::Close)];
+    }
+    let viewer = kit == Kit::Viewer;
     let mut v = vec![
         Some(Btn::Tool(Tool::Move)),
         Some(Btn::Tool(Tool::Pen)),
@@ -1858,21 +1881,21 @@ fn metrics(s: f32) -> Metrics {
     Metrics { pad: f(8.0), btn: f(32.0), gap: f(4.0), sep: f(12.0) }
 }
 
-pub fn toolbar_size(s: f32, viewer: bool) -> (i32, i32) {
+pub fn toolbar_size(s: f32, kit: Kit) -> (i32, i32) {
     let m = metrics(s);
     let mut x = m.pad;
-    for it in items(viewer) {
+    for it in items(kit) {
         x += if it.is_some() { m.btn + m.gap } else { m.sep };
     }
     (x - m.gap + m.pad, m.btn + 2 * m.pad)
 }
 
-fn build_toolbar(r: Rect, mon: usize, s: f32, viewer: bool) -> Toolbar {
+fn build_toolbar(r: Rect, mon: usize, s: f32, kit: Kit) -> Toolbar {
     let m = metrics(s);
     let mut x = r.l + m.pad;
     let mut buttons = Vec::new();
     let mut sep_x = 0;
-    for it in items(viewer) {
+    for it in items(kit) {
         match it {
             Some(b) => {
                 buttons.push((b, rect(x, r.t + m.pad, x + m.btn, r.t + m.pad + m.btn)));
@@ -1945,8 +1968,8 @@ mod tests {
 
     #[test]
     fn toolbar_size_scales_with_dpi() {
-        let (w1, h1) = toolbar_size(1.0, false);
-        let (w2, h2) = toolbar_size(2.0, false);
+        let (w1, h1) = toolbar_size(1.0, Kit::Full);
+        let (w2, h2) = toolbar_size(2.0, Kit::Full);
         assert!(w1 > 300 && w1 < 560, "{w1}");
         assert_eq!(h1, 34 + 14);
         assert!((w2 - 2 * w1).abs() <= 6 && (h2 - 2 * h1).abs() <= 2);
@@ -1954,10 +1977,11 @@ mod tests {
 
     #[test]
     fn toolbar_buttons_fit_inside() {
-        let (w, h) = toolbar_size(1.25, false);
-        let tb = build_toolbar(rect(100, 100, 100 + w, 100 + h), 0, 1.25, false);
+        let (w, h) = toolbar_size(1.25, Kit::Full);
+        let tb = build_toolbar(rect(100, 100, 100 + w, 100 + h), 0, 1.25, Kit::Full);
         assert_eq!(tb.buttons.len(), 12);
-        assert_eq!(build_toolbar(rect(0, 0, 900, 90), 0, 1.0, true).buttons.len(), 11);
+        assert_eq!(build_toolbar(rect(0, 0, 900, 90), 0, 1.0, Kit::Viewer).buttons.len(), 11);
+        assert_eq!(build_toolbar(rect(0, 0, 900, 90), 0, 1.0, Kit::Start).buttons.len(), 2);
         for (_, r) in &tb.buttons {
             assert!(tb.rect.contains_rect(r));
         }
@@ -1970,8 +1994,8 @@ mod tests {
     #[test]
     fn popover_stays_inside_the_monitor() {
         let mon = rect(0, 0, 1920, 1080);
-        let (w, h) = toolbar_size(1.0, false);
-        let tb = build_toolbar(rect(1500, 1000, 1500 + w, 1000 + h), 0, 1.0, false);
+        let (w, h) = toolbar_size(1.0, Kit::Full);
+        let tb = build_toolbar(rect(1500, 1000, 1500 + w, 1000 + h), 0, 1.0, Kit::Full);
         let p = build_popover(&tb, mon);
         assert!(mon.contains_rect(&p.rect), "{:?}", p.rect);
         assert_eq!(p.swatches.len(), 10);

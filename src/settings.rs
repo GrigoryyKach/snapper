@@ -74,6 +74,7 @@ struct App {
     recording: bool,
     /// Recording the scrolling-capture hotkey instead of the main one.
     recording_scroll: bool,
+    #[cfg_attr(unix, allow(dead_code))]
     scroll_err: Option<HkErr>,
     hk_err: Option<HkErr>,
     /// Hotkey text of the last rejected attempt (to show the Print Screen hint).
@@ -160,6 +161,7 @@ impl App {
             self.recording = false;
             self.recording_scroll = false;
             if scroll {
+                #[cfg(windows)]
                 self.set_scroll_hotkey(Hotkey { mods, vk });
             } else {
                 self.set_hotkey(Hotkey { mods, vk });
@@ -190,7 +192,8 @@ impl App {
         }
     }
 
-    /// Validates and saves the optional scrolling-capture hotkey.
+    /// Validates and saves the optional scrolling-capture hotkey (Windows only).
+    #[cfg(windows)]
     fn set_scroll_hotkey(&mut self, hk: Hotkey) {
         let text = hk.format();
         if hk.mods == 0 && !hotkey::allowed_without_modifier(hk.vk) {
@@ -210,7 +213,8 @@ impl App {
         self.apply();
     }
 
-    /// The optional hotkey that starts a scrolling capture directly.
+    /// The optional hotkey that starts a scrolling capture (Windows only).
+    #[cfg(windows)]
     fn scroll_row(&mut self, ui: &mut Ui, p: &Pal) {
         let t = self.s();
         let label = if self.recording_scroll {
@@ -283,7 +287,6 @@ impl App {
             self.wayland_block(ui, p);
         } else {
             self.hotkey_rows(ui, p);
-            self.scroll_row(ui, p);
         }
         #[cfg(windows)]
         {

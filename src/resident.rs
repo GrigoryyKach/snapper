@@ -34,6 +34,9 @@ const WM_UPDATE_DONE: u32 = WM_APP + 2;
 const WM_SCROLL_DONE: u32 = WM_APP + 3;
 const HOTKEY_ID: i32 = 1;
 const HOTKEY_SCROLL_ID: i32 = 2;
+/// Temporary hotkeys while a scrolling capture runs (the user is browsing, so Esc is not ours).
+const HOTKEY_SCROLL_DONE: i32 = 3;
+const HOTKEY_SCROLL_CANCEL: i32 = 4;
 const TIMER_CAPTURE: usize = 1;
 const TIMER_PREWARM: usize = 2;
 const TIMER_SCROLL: usize = 3;
@@ -184,7 +187,21 @@ fn trim_memory() {
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_HOTKEY => {
-            start_capture(wp.0 as i32 == HOTKEY_SCROLL_ID);
+            match wp.0 as i32 {
+                HOTKEY_SCROLL_ID => {
+                    // pressed again while capturing: that finishes it
+                    if !scroll_request(true) {
+                        start_capture(true);
+                    }
+                }
+                HOTKEY_SCROLL_DONE => {
+                    scroll_request(true);
+                }
+                HOTKEY_SCROLL_CANCEL => {
+                    scroll_request(false);
+                }
+                _ => start_capture(false),
+            }
             return LRESULT(0);
         }
         WM_SCROLL_DONE => {
@@ -273,17 +290,38 @@ fn start_capture(scroll: bool) {
     overlay::start(Params { lang, color, stroke, scroll });
 }
 
-/// Starts the scrolling capture of `area` (the overlay is already gone).
+/// Starts the scrolling capture of `area` (the overlay is already gone). The screen stays usable:
+/// Done and Cancel are the bar's buttons and two temporary global hotkeys.
 fn start_scroll(area: Rect) {
-    let Some((hwnd, max_rows, lang)) = with(|s| (s.hwnd, s.cfg.scroll_max_height as usize, s.lang)) else { return };
+    let Some((hwnd, max_rows, lang, own_key)) = with(|s| (s.hwnd, s.cfg.scroll_max_height as usize, s.lang, s.cfg.scroll_hotkey.clone())) else { return };
     let shared = scroll::spawn(area, max_rows, hwnd, WM_SCROLL_DONE);
-    scroll::show_hud(shared.clone(), lang, area);
+    let reg = |id: i32, vk: u32| unsafe { RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(MOD_CONTROL | MOD_SHIFT | 0x4000), vk).is_ok() };
+    let done_ok = reg(HOTKEY_SCROLL_DONE, 0x0D);
+    let cancel_ok = reg(HOTKEY_SCROLL_CANCEL, 0x08);
+    let own = Hotkey::parse(&own_key).map(|h| h.format());
+    let done_key = own.unwrap_or_else(|| if done_ok { "Ctrl+Shift+Enter".to_string() } else { String::new() });
+    let cancel_key = if cancel_ok { "Ctrl+Shift+Backspace" } else { "" };
+    scroll::show_ui(shared.clone(), lang, area, &done_key, cancel_key);
     with(|s| s.scroll = Some((shared, area)));
+}
+
+/// Done (`true`) or Cancel for the running scrolling capture. Returns `false` when none runs.
+fn scroll_request(done: bool) -> bool {
+    let Some(Some((sh, _))) = with(|s| s.scroll.clone()) else { return false };
+    let flag = if done { &sh.done_req } else { &sh.cancel_req };
+    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    true
 }
 
 /// The worker finished: open the stitched picture in the viewer and say what happened.
 fn scroll_done() {
-    scroll::close_hud();
+    scroll::close_ui();
+    if let Some(h) = with(|s| s.hwnd) {
+        unsafe {
+            let _ = UnregisterHotKey(Some(h), HOTKEY_SCROLL_DONE);
+            let _ = UnregisterHotKey(Some(h), HOTKEY_SCROLL_CANCEL);
+        }
+    }
     let Some(Some((shared, area))) = with(|s| s.scroll.take()) else { return };
     let outcome = shared.outcome.lock().ok().and_then(|mut o| o.take());
     let Some((lang, color, stroke)) = with(|s| (s.lang, config::parse_hex_color(&s.cfg.last_color).unwrap_or(0xff3b30), s.cfg.last_stroke as usize)) else {
@@ -296,15 +334,15 @@ fn scroll_done() {
     let note = match outcome.note {
         scroll::Note::None => None,
         scroll::Note::Limit => Some(t.scroll_limit.replace("{h}", &rows.to_string())),
-        scroll::Note::NoMatch => Some(t.scroll_nomatch.to_string()),
         scroll::Note::Nothing => Some(t.scroll_nothing.to_string()),
         scroll::Note::Failed => Some(t.scroll_failed.to_string()),
     };
     let mut ok = false;
+    let had_image = outcome.image.is_some();
     if let Some(img) = outcome.image {
         ok = overlay::start_view(Params { lang, color, stroke, scroll: false }, img, area);
     }
-    if !ok && note.is_none() {
+    if !ok && note.is_none() && had_image {
         with(|s| balloon(s, "Snapper", t.scroll_failed, BalloonKind::None));
     }
     if let Some(n) = note {
@@ -656,10 +694,8 @@ fn open_settings() {
 
 fn quit() {
     overlay::cancel();
-    if let Some(Some((sh, _))) = with(|s| s.scroll.clone()) {
-        sh.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-    scroll::close_hud();
+    scroll_request(false);
+    scroll::close_ui();
     if let Some(h) = with(|s| s.hwnd) {
         unsafe {
             let _ = DestroyWindow(h);
