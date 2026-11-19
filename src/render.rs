@@ -74,6 +74,37 @@ impl Gfx {
         f
     }
 
+    /// Consolas text format for figures (size readouts), cached with the others (key bit 31 marks mono).
+    pub fn font_mono(&self, size: f32) -> IDWriteTextFormat {
+        let key = (size * 4.0) as u32 | 1 << 31;
+        if let Some((_, _, f)) = self.fonts.borrow().iter().find(|(k, _, _)| *k == key) {
+            return f.clone();
+        }
+        let f = unsafe {
+            self.dw
+                .CreateTextFormat(w!("Consolas"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, w!("en-us"))
+                .expect("CreateTextFormat")
+        };
+        let mut v = self.fonts.borrow_mut();
+        if v.len() > 24 {
+            v.clear();
+        }
+        v.push((key, false, f.clone()));
+        f
+    }
+
+    /// Width and height of `text` in the mono face.
+    pub fn measure_mono(&self, text: &str, size: f32) -> (f32, f32) {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let fmt = self.font_mono(size);
+        let Some(l) = (unsafe { self.dw.CreateTextLayout(&wide, &fmt, 100_000.0, 100_000.0).ok() }) else { return (0.0, size) };
+        let mut m = DWRITE_TEXT_METRICS::default();
+        unsafe {
+            let _ = l.GetMetrics(&mut m);
+        }
+        (m.widthIncludingTrailingWhitespace, m.height)
+    }
+
     pub fn layout(&self, text: &str, size: f32, bold: bool) -> Option<IDWriteTextLayout> {
         let wide: Vec<u16> = text.encode_utf16().collect();
         let fmt = self.font(size, bold);

@@ -133,12 +133,19 @@ enum Btn {
 }
 
 const PRESETS: [u32; 10] = [0xff3b30, 0xff9500, 0xffcc00, 0x34c759, 0x32d4e6, 0x0a84ff, 0xaf52de, 0xff2d92, 0xffffff, 0x000000];
-const ACCENT: u32 = 0x4f6bff;
-const BAR_BG: u32 = 0x1b1e2b;
-const BAR_LINE: u32 = 0x3a4064;
-const BTN_HOVER: u32 = 0x2b3050;
-const ICON: u32 = 0xe4e8f7;
-const ICON_OFF: u32 = 0x666c8c;
+// The suite's graphite ramp, dark only: the overlay floats over a dimmed screenshot.
+const ACCENT: u32 = 0x35a7ff;
+const BAR_BG: u32 = 0x19191b;
+const BAR_LINE: u32 = 0x3a3a3d;
+const BTN_HOVER: u32 = 0x232325;
+const BTN_ACTIVE: u32 = 0x303033;
+const ICON: u32 = 0xededed;
+const ICON_OFF: u32 = 0x636368;
+/// Deepest surface: the viewer band, the size label and the tooltips.
+const DEEP: u32 = 0x0f0f10;
+const TEXT2: u32 = 0xa1a1a6;
+const MUTED: u32 = 0x85858b;
+const SWATCH_LINE: u32 = 0x5a5a5f;
 
 fn col(rgb: u32) -> Color32 {
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
@@ -292,6 +299,19 @@ pub fn run(dir: &Path) -> i32 {
     }
 }
 
+/// The signature: an L-shaped crop mark standing 6px off each corner of the frame, like the corner
+/// brackets of a viewfinder. Accent, 2px, 16px arms, static. They sit outside the selection and never
+/// cover the captured pixels.
+fn draw_crop_marks(painter: &Painter, sr: ERect) {
+    let (arm, w, o) = (16.0, 2.0, 6.0);
+    let (l, t, r, b) = (sr.left() - o, sr.top() - o, sr.right() + o, sr.bottom() + o);
+    let stroke = Stroke::new(w, col(ACCENT));
+    for (cx, cy, dx, dy) in [(l, t, 1.0f32, 1.0f32), (r, t, -1.0, 1.0), (l, b, 1.0, -1.0), (r, b, -1.0, -1.0)] {
+        painter.line_segment([pos2(cx - dx * w / 2.0, cy), pos2(cx + dx * arm, cy)], stroke);
+        painter.line_segment([pos2(cx, cy - dy * w / 2.0), pos2(cx, cy + dy * arm)], stroke);
+    }
+}
+
 fn default_font() -> Option<FontArc> {
     let defs = egui::FontDefinitions::default();
     let d = defs.font_data.get("Ubuntu-Light")?;
@@ -423,7 +443,7 @@ impl App {
         }
         let places = self.monitor_places();
         let places = if places.is_empty() { vec![Place { rect: self.view.rect_to_screen(&self.vrect), toolbar: toolbar_size(self.scroll_button()) }] } else { places };
-        if let Some((r, mon)) = place_toolbar(&sel, &places, 8) {
+        if let Some((r, mon)) = place_toolbar(&sel, &places, 12) {
             let tb = build_toolbar(r, self.scroll_button());
             self.popover = if self.popover_open { Some(build_popover(&tb, places[mon].rect)) } else { None };
             self.tb = Some(tb);
@@ -866,7 +886,7 @@ impl App {
     fn paint(&self, ui: &egui::Ui) {
         let painter = ui.painter();
         let full = ui.max_rect();
-        painter.rect_filled(full, 0.0, if self.mode == Mode::View { col(0x14161f) } else { Color32::BLACK });
+        painter.rect_filled(full, 0.0, if self.mode == Mode::View { col(0x141415) } else { Color32::BLACK });
         let all = self.vrect;
         self.draw_region(painter, &all);
         let pic = ERect::from_min_max(self.view.to_screen(0.0, 0.0), self.view.to_screen(all.r as f32, all.b as f32));
@@ -894,12 +914,13 @@ impl App {
             }
         }
         painter.rect_stroke(sr.expand(0.5), 0.0, Stroke::new(1.0, col(ACCENT)), StrokeKind::Middle);
+        draw_crop_marks(painter, sr);
         if self.mode == Mode::View {
             // band above the picture, so the picture never slides under the toolbar
             let band = ERect::from_min_max(full.min, pos2(full.right(), full.top() + self.band()));
-            painter.rect_filled(band, 0.0, col(0x14161f));
-            let g = painter.layout_no_wrap(format!("{} \u{00d7} {}", sel.w(), sel.h()), FontId::proportional(12.5), col(0xaab0cf));
-            painter.galley(pos2(18.0, full.top() + (self.band() - g.size().y) / 2.0), g, col(0xaab0cf));
+            painter.rect_filled(band, 0.0, col(0x141415));
+            let g = painter.layout_no_wrap(format!("{} \u{00d7} {}", sel.w(), sel.h()), FontId::monospace(12.5), col(TEXT2));
+            painter.galley(pos2(18.0, full.top() + (self.band() - g.size().y) / 2.0), g, col(TEXT2));
         } else if !matches!(self.op, Some(Op::Select { .. })) {
             for h in Handle::ALL {
                 let c = handle_point(&ss, h);
@@ -927,7 +948,7 @@ impl App {
         let g = painter.layout_no_wrap(text, FontId::proportional(14.0), cola(0xffffff, 0.85));
         let pos = pos2(pic.center().x - g.size().x / 2.0, pic.top() + 24.0);
         let bg = ERect::from_min_size(pos - vec2(10.0, 6.0), g.size() + vec2(20.0, 12.0));
-        painter.rect_filled(bg, 8.0, cola(0x12141f, 0.85));
+        painter.rect_filled(bg, 8.0, cola(DEEP, 0.85));
         painter.galley(pos, g, Color32::WHITE);
     }
 
@@ -956,26 +977,26 @@ impl App {
     fn draw_label(&self, painter: &Painter, sel: &Rect, ss: &Rect, pic: ERect) {
         let size = format!("{} \u{00d7} {}", sel.w(), sel.h());
         let text = if self.mode == Mode::Scroll { format!("{}  \u{00b7}  {}", strings::tr(self.lang).t_scroll, size) } else { size };
-        let g = painter.layout_no_wrap(text, FontId::proportional(12.5), Color32::WHITE);
-        let (pw, ph) = (7.0, 4.0);
+        let g = painter.layout_no_wrap(text, FontId::monospace(12.5), col(ICON));
+        let (pw, ph) = (8.0, 4.0);
         let (w, h) = (g.size().x + pw * 2.0, g.size().y + ph * 2.0);
         let (x, y) = if matches!(self.op, Some(Op::Select { .. })) {
             ((self.cursor.x + 16) as f32, (self.cursor.y + 20) as f32)
         } else {
-            let y = ss.t as f32 - h - 6.0;
+            let y = ss.t as f32 - h - 12.0;
             (ss.l as f32, if y < pic.top() { ss.t as f32 + 6.0 } else { y })
         };
         let x = x.clamp(pic.left(), (pic.right() - w).max(pic.left()));
         let y = y.clamp(pic.top(), (pic.bottom() - h).max(pic.top()));
         let r = ERect::from_min_size(pos2(x, y), vec2(w, h));
-        painter.rect_filled(r, 6.0, cola(0x12141f, 0.88));
-        painter.galley(pos2(x + pw, y + ph), g, Color32::WHITE);
+        painter.rect_filled(r, 6.0, cola(DEEP, 0.88));
+        painter.galley(pos2(x + pw, y + ph), g, col(ICON));
     }
 
     fn draw_toolbar(&self, painter: &Painter, tb: &Toolbar) {
         let r = e_rect(&tb.rect);
-        painter.rect_filled(r, r.height() / 2.0, cola(BAR_BG, 0.97));
-        painter.rect_stroke(r, r.height() / 2.0, Stroke::new(1.0, col(BAR_LINE)), StrokeKind::Inside);
+        painter.rect_filled(r, 16.0, cola(BAR_BG, 0.97));
+        painter.rect_stroke(r, 16.0, Stroke::new(1.0, col(BAR_LINE)), StrokeKind::Inside);
         painter.line_segment(
             [pos2(tb.sep_x as f32 + 0.5, r.top() + 12.0), pos2(tb.sep_x as f32 + 0.5, r.bottom() - 12.0)],
             Stroke::new(1.0, col(BAR_LINE)),
@@ -985,10 +1006,10 @@ impl App {
             let hover = self.hover == Some(*btn);
             let er = e_rect(br);
             if active || hover {
-                painter.rect_filled(er, 9.0, col(if active { ACCENT } else { BTN_HOVER }));
+                painter.rect_filled(er, 8.0, col(if active { BTN_ACTIVE } else { BTN_HOVER }));
             }
             let disabled = *btn == Btn::Undo && self.anns.is_empty();
-            let c = if disabled { ICON_OFF } else if active { 0xffffff } else { ICON };
+            let c = if disabled { ICON_OFF } else if active { ACCENT } else { ICON };
             self.draw_icon(painter, *btn, er, c);
         }
     }
@@ -1105,7 +1126,7 @@ impl App {
             Btn::Close => t.t_close,
         };
         let Some((_, br)) = tb.buttons.iter().find(|(b, _)| *b == btn) else { return };
-        let g = painter.layout_no_wrap(text.to_string(), FontId::proportional(12.5), col(0xf2f4ff));
+        let g = painter.layout_no_wrap(text.to_string(), FontId::proportional(12.5), col(ICON));
         let (pw, ph) = (8.0, 5.0);
         let (w, h) = (g.size().x + pw * 2.0, g.size().y + ph * 2.0);
         let screen = painter.clip_rect();
@@ -1113,48 +1134,48 @@ impl App {
         let below = tb.rect.b as f32 + 6.0;
         let y = if below + h <= screen.bottom() { below } else { tb.rect.t as f32 - 6.0 - h };
         let r = ERect::from_min_size(pos2(x, y), vec2(w, h));
-        painter.rect_filled(r, 6.0, cola(0x12141f, 0.96));
+        painter.rect_filled(r, 6.0, cola(DEEP, 0.96));
         painter.rect_stroke(r, 6.0, Stroke::new(1.0, col(BAR_LINE)), StrokeKind::Inside);
-        painter.galley(pos2(x + pw, y + ph), g, col(0xf2f4ff));
+        painter.galley(pos2(x + pw, y + ph), g, col(ICON));
     }
 
     fn draw_popover(&self, painter: &Painter, p: &Popover) {
         let r = e_rect(&p.rect);
-        painter.rect_filled(r, 14.0, cola(BAR_BG, 0.98));
-        painter.rect_stroke(r, 14.0, Stroke::new(1.0, col(BAR_LINE)), StrokeKind::Inside);
+        painter.rect_filled(r, 16.0, cola(BAR_BG, 0.98));
+        painter.rect_stroke(r, 16.0, Stroke::new(1.0, col(BAR_LINE)), StrokeKind::Inside);
         for (i, sw) in p.swatches.iter().enumerate() {
             let e = e_rect(sw);
             let rad = e.width() / 2.0 - 2.0;
             painter.circle_filled(e.center(), rad, col(PRESETS[i]));
-            painter.circle_stroke(e.center(), rad, Stroke::new(1.0, col(0x59607f)));
+            painter.circle_stroke(e.center(), rad, Stroke::new(1.0, col(SWATCH_LINE)));
             if PRESETS[i] == self.color {
                 painter.circle_stroke(e.center(), rad + 3.0, Stroke::new(2.0, Color32::WHITE));
             }
         }
         for (i, sr) in p.strokes.iter().enumerate() {
             let e = e_rect(sr);
-            painter.rect_filled(e, 8.0, col(if i == self.stroke { ACCENT } else { BTN_HOVER }));
+            painter.rect_filled(e, 8.0, col(if i == self.stroke { BTN_ACTIVE } else { BTN_HOVER }));
             let cy = e.center().y;
-            painter.line_segment([pos2(e.left() + 12.0, cy), pos2(e.right() - 12.0, cy)], Stroke::new(STROKES[i], Color32::WHITE));
+            painter.line_segment([pos2(e.left() + 12.0, cy), pos2(e.right() - 12.0, cy)], Stroke::new(STROKES[i], col(if i == self.stroke { ACCENT } else { ICON })));
         }
         let t = strings::tr(self.lang);
         let hr = e_rect(&p.hex);
-        painter.rect_filled(hr, 8.0, col(0x12141f));
+        painter.rect_filled(hr, 8.0, col(DEEP));
         painter.rect_stroke(hr, 8.0, Stroke::new(1.0, col(if self.hex_focus { ACCENT } else { BAR_LINE })), StrokeKind::Inside);
         let f = FontId::proportional(13.0);
-        let lg = painter.layout_no_wrap(t.hex.to_string(), f.clone(), col(0x8e94b3));
-        painter.galley(pos2(hr.left() + 10.0, hr.center().y - lg.size().y / 2.0), lg, col(0x8e94b3));
-        let hg = painter.layout_no_wrap(self.hex.clone(), f, col(0xf2f4ff));
+        let lg = painter.layout_no_wrap(t.hex.to_string(), f.clone(), col(MUTED));
+        painter.galley(pos2(hr.left() + 10.0, hr.center().y - lg.size().y / 2.0), lg, col(MUTED));
+        let hg = painter.layout_no_wrap(self.hex.clone(), f, col(ICON));
         let tx = hr.left() + 46.0;
         let ty = hr.center().y - hg.size().y / 2.0;
         let tw = hg.size().x;
-        painter.galley(pos2(tx, ty), hg.clone(), col(0xf2f4ff));
+        painter.galley(pos2(tx, ty), hg.clone(), col(ICON));
         if self.hex_focus {
             painter.line_segment([pos2(tx + tw + 1.0, ty), pos2(tx + tw + 1.0, ty + hg.size().y)], Stroke::new(1.0, Color32::WHITE));
         }
         let dot = pos2(hr.right() - 16.0, hr.center().y);
         painter.circle_filled(dot, 7.0, col(self.color));
-        painter.circle_stroke(dot, 7.0, Stroke::new(1.0, col(0x59607f)));
+        painter.circle_stroke(dot, 7.0, Stroke::new(1.0, col(SWATCH_LINE)));
     }
 }
 
@@ -1192,9 +1213,9 @@ fn items(scroll: bool) -> Vec<Option<Btn>> {
     v
 }
 
-const PAD: i32 = 7;
-const BTN: i32 = 34;
-const GAP: i32 = 3;
+const PAD: i32 = 8;
+const BTN: i32 = 32;
+const GAP: i32 = 4;
 const SEP: i32 = 12;
 
 fn toolbar_size(scroll: bool) -> (i32, i32) {
@@ -1227,7 +1248,7 @@ fn build_toolbar(r: Rect, scroll: bool) -> Toolbar {
 fn build_popover(tb: &Toolbar, mon: Rect) -> Popover {
     let (pad, sw, g) = (12, 28, 8);
     let w = pad * 2 + 5 * sw + 4 * g;
-    let (stroke_h, hex_h) = (30, 32);
+    let (stroke_h, hex_h) = (32, 32);
     let h = pad + 2 * sw + g + 12 + stroke_h + 12 + hex_h + pad;
     let color_btn = tb.buttons.iter().find(|(b, _)| *b == Btn::Color).map(|(_, r)| *r).unwrap_or(tb.rect);
     let x = (color_btn.center().x - w / 2).clamp(mon.l, (mon.r - w).max(mon.l));

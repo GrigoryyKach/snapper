@@ -75,12 +75,19 @@ enum Btn {
 }
 
 const PRESETS: [u32; 10] = [0xff3b30, 0xff9500, 0xffcc00, 0x34c759, 0x32d4e6, 0x0a84ff, 0xaf52de, 0xff2d92, 0xffffff, 0x000000];
-const ACCENT: u32 = 0x4f6bff;
-const BAR_BG: u32 = 0x1b1e2b;
-const BAR_LINE: u32 = 0x3a4064;
-const BTN_HOVER: u32 = 0x2b3050;
-const ICON: u32 = 0xe4e8f7;
-const ICON_OFF: u32 = 0x666c8c;
+// The suite's graphite ramp, dark only: the overlay floats over a dimmed screenshot.
+const ACCENT: u32 = 0x35a7ff;
+const BAR_BG: u32 = 0x19191b;
+const BAR_LINE: u32 = 0x3a3a3d;
+const BTN_HOVER: u32 = 0x232325;
+const BTN_ACTIVE: u32 = 0x303033;
+const ICON: u32 = 0xededed;
+const ICON_OFF: u32 = 0x636368;
+/// Deepest surface: the viewer background, the size label and the tooltips.
+const DEEP: u32 = 0x0f0f10;
+const TEXT2: u32 = 0xa1a1a6;
+const MUTED: u32 = 0x85858b;
+const SWATCH_LINE: u32 = 0x5a5a5f;
 
 struct Mon {
     hwnd: HWND,
@@ -677,7 +684,7 @@ impl Session {
             return;
         }
         let places: Vec<Place> = self.mons.iter().map(|m| Place { rect: m.rect, toolbar: toolbar_size(m.scale, false) }).collect();
-        let gap = (8.0 * self.scale_at(pt(sel.r - 1, sel.b - 1))) as i32;
+        let gap = (12.0 * self.scale_at(pt(sel.r - 1, sel.b - 1))) as i32;
         if let Some((r, mon)) = place_toolbar(&sel, &places, gap) {
             self.tb = Some(build_toolbar(r, mon, self.mons[mon].scale, false));
         }
@@ -1354,7 +1361,7 @@ impl Session {
             rt.BeginDraw();
             rt.SetTransform(&windows_numerics_translate(-(mr.l as f32), -(mr.t as f32)));
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            rt.Clear(Some(&colorf(0x14161f, 1.0)));
+            rt.Clear(Some(&colorf(0x141415, 1.0)));
             let b = &pen.brush;
             // the image, tile by tile
             rt.PushAxisAlignedClip(&rect_f(&v.vp), D2D1_ANTIALIAS_MODE_ALIASED);
@@ -1388,6 +1395,7 @@ impl Session {
             // frame and scroll thumb
             b.SetColor(&colorf(ACCENT, 1.0));
             rt.DrawRectangle(&rf(sel.l as f32 - 0.5, sel.t as f32 - 0.5, sel.r as f32 + 0.5, sel.b as f32 + 0.5), b, 1.0, None);
+            draw_crop_marks(rt, b, &sel, scale);
             let total = v.ih as f32 * v.z;
             if total > v.vp.h() as f32 {
                 let track = v.vp.h() as f32 - 8.0 * scale;
@@ -1401,9 +1409,9 @@ impl Session {
             // size label at the left of the toolbar band
             let text = if (v.z - 1.0).abs() < 1e-3 { format!("{} \u{00d7} {}", v.iw, v.ih) } else { format!("{} \u{00d7} {}  ({:.0}%)", v.iw, v.ih, v.z * 100.0) };
             let fs = 12.5 * scale;
-            let fmt = gfx.font(fs, true);
-            let (_, th) = gfx.measure(&text, fs, true);
-            b.SetColor(&colorf(0xaab0cf, 1.0));
+            let fmt = gfx.font_mono(fs);
+            let (_, th) = gfx.measure_mono(&text, fs);
+            b.SetColor(&colorf(TEXT2, 1.0));
             let wide: Vec<u16> = text.encode_utf16().collect();
             let ly = mr.t as f32 + ((v.vp.t - mr.t) as f32 - th) / 2.0;
             rt.DrawText(&wide, &fmt, &rf(mr.l as f32 + 18.0 * scale, ly, mr.l as f32 + 400.0 * scale, ly + th + 4.0), b, D2D1_DRAW_TEXT_OPTIONS_NONE, windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL);
@@ -1473,6 +1481,7 @@ impl Session {
                 // border
                 b.SetColor(&colorf(ACCENT, 1.0));
                 rt.DrawRectangle(&rf(sel.l as f32 - 0.5, sel.t as f32 - 0.5, sel.r as f32 + 0.5, sel.b as f32 + 0.5), b, 1.0, None);
+                draw_crop_marks(rt, b, &sel, scale);
 
                 if !matches!(self.op, Some(Op::Select { .. })) {
                     let half = 4.0 * scale;
@@ -1526,22 +1535,22 @@ impl Session {
         let size = format!("{} \u{00d7} {}", sel.w(), sel.h());
         let text = if self.scroll_mode { format!("{}  \u{00b7}  {}", strings::tr(self.lang).t_scroll, size) } else { size };
         let fs = 12.5 * scale;
-        let (tw, th) = gfx.measure(&text, fs, true);
-        let (pw, ph) = (7.0 * scale, 4.0 * scale);
+        let (tw, th) = gfx.measure_mono(&text, fs);
+        let (pw, ph) = (8.0 * scale, 4.0 * scale);
         let (w, h) = (tw + pw * 2.0, th + ph * 2.0);
         let (x, y) = if matches!(self.op, Some(Op::Select { .. })) {
             ((self.cursor.x + 16) as f32, (self.cursor.y + 20) as f32)
         } else {
-            let y = sel.t as f32 - h - 6.0 * scale;
+            let y = sel.t as f32 - h - 12.0 * scale;
             (sel.l as f32, if y < self.vrect.t as f32 { sel.t as f32 + 6.0 * scale } else { y })
         };
         let x = x.clamp(self.vrect.l as f32, (self.vrect.r as f32 - w).max(self.vrect.l as f32));
         let y = y.clamp(self.vrect.t as f32, (self.vrect.b as f32 - h).max(self.vrect.t as f32));
         let rr = D2D1_ROUNDED_RECT { rect: rf(x, y, x + w, y + h), radiusX: 6.0 * scale, radiusY: 6.0 * scale };
-        pen.brush.SetColor(&colorf(0x12141f, 0.88));
+        pen.brush.SetColor(&colorf(DEEP, 0.88));
         rt.FillRoundedRectangle(&rr, &pen.brush);
-        pen.brush.SetColor(&colorf(0xffffff, 1.0));
-        let fmt = gfx.font(fs, true);
+        pen.brush.SetColor(&colorf(ICON, 1.0));
+        let fmt = gfx.font_mono(fs);
         let wide: Vec<u16> = text.encode_utf16().collect();
         rt.DrawText(&wide, &fmt, &rf(x + pw, y + ph, x + w, y + h), &pen.brush, D2D1_DRAW_TEXT_OPTIONS_NONE, windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL);
     }
@@ -1549,7 +1558,7 @@ impl Session {
     unsafe fn draw_toolbar(&self, gfx: &Gfx, rt: &ID2D1RenderTarget, pen: &Pen, tb: &Toolbar) {
         let s = tb.scale;
         let b = &pen.brush;
-        let rr = D2D1_ROUNDED_RECT { rect: rect_f(&tb.rect), radiusX: tb.rect.h() as f32 / 2.0, radiusY: tb.rect.h() as f32 / 2.0 };
+        let rr = D2D1_ROUNDED_RECT { rect: rect_f(&tb.rect), radiusX: 16.0 * s, radiusY: 16.0 * s };
         b.SetColor(&colorf(BAR_BG, 0.97));
         rt.FillRoundedRectangle(&rr, b);
         b.SetColor(&colorf(BAR_LINE, 1.0));
@@ -1562,12 +1571,12 @@ impl Session {
             let active = *btn == Btn::Tool(self.tool);
             let hover = self.hover == Some(*btn);
             if active || hover {
-                let rr = D2D1_ROUNDED_RECT { rect: rect_f(r), radiusX: 9.0 * s, radiusY: 9.0 * s };
-                b.SetColor(&colorf(if active { ACCENT } else { BTN_HOVER }, 1.0));
+                let rr = D2D1_ROUNDED_RECT { rect: rect_f(r), radiusX: 8.0 * s, radiusY: 8.0 * s };
+                b.SetColor(&colorf(if active { BTN_ACTIVE } else { BTN_HOVER }, 1.0));
                 rt.FillRoundedRectangle(&rr, b);
             }
             let disabled = *btn == Btn::Undo && self.anns.is_empty();
-            let col = if disabled { ICON_OFF } else if active { 0xffffff } else { ICON };
+            let col = if disabled { ICON_OFF } else if active { ACCENT } else { ICON };
             self.draw_icon(gfx, rt, pen, *btn, r, s, col);
         }
     }
@@ -1712,11 +1721,11 @@ impl Session {
         let below = tb.rect.b as f32 + 6.0 * s;
         let y = if below + h <= mr.b as f32 { below } else { tb.rect.t as f32 - 6.0 * s - h };
         let rr = D2D1_ROUNDED_RECT { rect: rf(x, y, x + w, y + h), radiusX: 6.0 * s, radiusY: 6.0 * s };
-        pen.brush.SetColor(&colorf(0x12141f, 0.96));
+        pen.brush.SetColor(&colorf(DEEP, 0.96));
         rt.FillRoundedRectangle(&rr, &pen.brush);
         pen.brush.SetColor(&colorf(BAR_LINE, 1.0));
         rt.DrawRoundedRectangle(&rr, &pen.brush, 1.0, None);
-        pen.brush.SetColor(&colorf(0xf2f4ff, 1.0));
+        pen.brush.SetColor(&colorf(ICON, 1.0));
         let fmt = gfx.font(fs, false);
         let wide: Vec<u16> = text.encode_utf16().collect();
         rt.DrawText(&wide, &fmt, &rf(x + pw, y + ph, x + w, y + h), &pen.brush, D2D1_DRAW_TEXT_OPTIONS_NONE, windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL);
@@ -1724,7 +1733,7 @@ impl Session {
 
     unsafe fn draw_popover(&self, gfx: &Gfx, rt: &ID2D1RenderTarget, pen: &Pen, p: &Popover, s: f32) {
         let b = &pen.brush;
-        let rr = D2D1_ROUNDED_RECT { rect: rect_f(&p.rect), radiusX: 14.0 * s, radiusY: 14.0 * s };
+        let rr = D2D1_ROUNDED_RECT { rect: rect_f(&p.rect), radiusX: 16.0 * s, radiusY: 16.0 * s };
         b.SetColor(&colorf(BAR_BG, 0.98));
         rt.FillRoundedRectangle(&rr, b);
         b.SetColor(&colorf(BAR_LINE, 1.0));
@@ -1734,7 +1743,7 @@ impl Session {
             let rad = r.w() as f32 / 2.0 - 2.0 * s;
             b.SetColor(&colorf(PRESETS[i], 1.0));
             rt.FillEllipse(&D2D1_ELLIPSE { point: v2(c.x as f32, c.y as f32), radiusX: rad, radiusY: rad }, b);
-            b.SetColor(&colorf(0x59607f, 1.0));
+            b.SetColor(&colorf(SWATCH_LINE, 1.0));
             rt.DrawEllipse(&D2D1_ELLIPSE { point: v2(c.x as f32, c.y as f32), radiusX: rad, radiusY: rad }, b, 1.0, None);
             if PRESETS[i] == self.color {
                 b.SetColor(&colorf(0xffffff, 1.0));
@@ -1745,9 +1754,9 @@ impl Session {
         for (i, r) in p.strokes.iter().enumerate() {
             let sel = i == self.stroke;
             let rr = D2D1_ROUNDED_RECT { rect: rect_f(r), radiusX: 8.0 * s, radiusY: 8.0 * s };
-            b.SetColor(&colorf(if sel { ACCENT } else { BTN_HOVER }, 1.0));
+            b.SetColor(&colorf(if sel { BTN_ACTIVE } else { BTN_HOVER }, 1.0));
             rt.FillRoundedRectangle(&rr, b);
-            b.SetColor(&colorf(0xffffff, 1.0));
+            b.SetColor(&colorf(if sel { ACCENT } else { ICON }, 1.0));
             let cy = r.center().y as f32;
             rt.DrawLine(
                 v2(r.l as f32 + 12.0 * s, cy),
@@ -1762,20 +1771,20 @@ impl Session {
         let fs = 13.0 * s;
         let hr = p.hex;
         let rr = D2D1_ROUNDED_RECT { rect: rect_f(&hr), radiusX: 8.0 * s, radiusY: 8.0 * s };
-        b.SetColor(&colorf(0x12141f, 1.0));
+        b.SetColor(&colorf(DEEP, 1.0));
         rt.FillRoundedRectangle(&rr, b);
         b.SetColor(&colorf(if self.hex_focus { ACCENT } else { BAR_LINE }, 1.0));
         rt.DrawRoundedRectangle(&rr, b, 1.0, None);
         let fmt = gfx.font(fs, false);
         let label: Vec<u16> = t.hex.encode_utf16().collect();
-        b.SetColor(&colorf(0x8e94b3, 1.0));
+        b.SetColor(&colorf(MUTED, 1.0));
         let lh = hr.h() as f32;
         let (_, th) = gfx.measure("HEX", fs, false);
         let ty = hr.t as f32 + (lh - th) / 2.0;
         rt.DrawText(&label, &fmt, &rf(hr.l as f32 + 10.0 * s, ty, hr.r as f32, hr.b as f32), b, D2D1_DRAW_TEXT_OPTIONS_NONE, windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL);
         let shown = if self.hex.is_empty() { String::new() } else { self.hex.clone() };
         let tx = hr.l as f32 + 46.0 * s;
-        b.SetColor(&colorf(0xf2f4ff, 1.0));
+        b.SetColor(&colorf(ICON, 1.0));
         let wide: Vec<u16> = shown.encode_utf16().collect();
         rt.DrawText(&wide, &fmt, &rf(tx, ty, hr.r as f32, hr.b as f32), b, D2D1_DRAW_TEXT_OPTIONS_NONE, windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL);
         if self.hex_focus {
@@ -1787,8 +1796,23 @@ impl Session {
         let dot = D2D1_ELLIPSE { point: v2(hr.r as f32 - 16.0 * s, hr.center().y as f32), radiusX: 7.0 * s, radiusY: 7.0 * s };
         b.SetColor(&colorf(self.color, 1.0));
         rt.FillEllipse(&dot, b);
-        b.SetColor(&colorf(0x59607f, 1.0));
+        b.SetColor(&colorf(SWATCH_LINE, 1.0));
         rt.DrawEllipse(&dot, b, 1.0, None);
+    }
+}
+
+/// The signature: an L-shaped crop mark standing 6px off each corner of the frame, like the corner
+/// brackets of a viewfinder. Accent, 2px, 16px arms, static. They sit outside the selection and never
+/// cover the captured pixels.
+unsafe fn draw_crop_marks(rt: &ID2D1RenderTarget, b: &ID2D1SolidColorBrush, sel: &Rect, scale: f32) {
+    let (arm, w, o) = (16.0 * scale, 2.0 * scale.max(1.0), 6.0 * scale);
+    let (l, t, r, bt) = (sel.l as f32 - o, sel.t as f32 - o, sel.r as f32 + o, sel.b as f32 + o);
+    b.SetColor(&colorf(ACCENT, 1.0));
+    let line = |a: (f32, f32), c: (f32, f32)| rt.DrawLine(v2(a.0, a.1), v2(c.0, c.1), b, w, None);
+    for (cx, cy, dx, dy) in [(l, t, 1.0, 1.0), (r, t, -1.0, 1.0), (l, bt, 1.0, -1.0), (r, bt, -1.0, -1.0)] {
+        // the arms overshoot the corner by half a stroke so the corner is filled
+        line((cx - dx * w / 2.0, cy), (cx + dx * arm, cy));
+        line((cx, cy - dy * w / 2.0), (cx, cy + dy * arm));
     }
 }
 
@@ -1831,7 +1855,7 @@ struct Metrics {
 
 fn metrics(s: f32) -> Metrics {
     let f = |v: f32| (v * s).round() as i32;
-    Metrics { pad: f(7.0), btn: f(34.0), gap: f(3.0), sep: f(12.0) }
+    Metrics { pad: f(8.0), btn: f(32.0), gap: f(4.0), sep: f(12.0) }
 }
 
 pub fn toolbar_size(s: f32, viewer: bool) -> (i32, i32) {
@@ -1868,7 +1892,7 @@ fn build_popover(tb: &Toolbar, mon: Rect) -> Popover {
     let f = |v: f32| (v * s).round() as i32;
     let (pad, sw, g) = (f(12.0), f(28.0), f(8.0));
     let w = pad * 2 + 5 * sw + 4 * g;
-    let stroke_h = f(30.0);
+    let stroke_h = f(32.0);
     let hex_h = f(32.0);
     let h = pad + 2 * sw + g + f(12.0) + stroke_h + f(12.0) + hex_h + pad;
     let color_btn = tb.buttons.iter().find(|(b, _)| *b == Btn::Color).map(|(_, r)| *r).unwrap_or(tb.rect);
