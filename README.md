@@ -66,6 +66,7 @@ cargo build --release
 | Text | Click, type (Unicode and IME work, Cyrillic included), `Enter` or a click elsewhere commits, `Shift+Enter` adds a line, `Esc` cancels only that text |
 | Colour | 10 presets plus a HEX field; three stroke widths (also set the text size). The choice is remembered and applies to every tool |
 | Undo | Multi-level (`Ctrl+Z`, redo with `Ctrl+Y`) |
+| Scrolling capture | Scroll the selected area and stitch one tall image (not on Wayland) |
 | Copy / Save / Close | `Ctrl+C` / `Ctrl+S` / `Esc` |
 
 ### Keys
@@ -94,16 +95,41 @@ Files are named `Snapper_YYYY-MM-DD_HH-mm-ss.png` (a numeric suffix is added on 
 `%USERPROFILE%\Pictures\Snapper` (`~/Pictures/Snapper` on Linux) unless you pick another folder in Settings. Format is PNG, or JPG at quality 90.
 After saving a notification shows "Saved: ..."; clicking it opens Explorer with the file selected (the folder, on Linux).
 
+## Scrolling capture
+
+Captures a long page, or any scrollable content, as one tall image.
+
+1. Start it from the **Scrolling capture** button in the overlay toolbar (after selecting an area), from the tray menu, or with the optional
+   hotkey you set in Settings (empty by default). From the tray menu or the hotkey you then drag the area; it starts when you let go.
+2. Select the scrollable part, for example the browser viewport. Leaving the page's scrollbar out gives the cleanest result.
+3. Snapper grabs the area, sends mouse-wheel input to its right edge (so a link tooltip does not end up in the frames), waits until the
+   content stops moving, and grabs again. A small bar outside the area shows the frames and the height with a **Stop** button; **Esc** stops too.
+4. It stops at the end of the page, at the height limit (`scroll_max_height`, 30,000 px by default), on Esc or Stop, or when the frames stop
+   matching (an animation or a video); in that case what was stitched so far is kept and a notice says so.
+5. The result opens in a viewer with the usual tools, copy and save. It is shown 1:1 (fitted to the width if wider than the screen) and
+   scrolls with the wheel, the arrow, Page Up/Down, Home and End keys, or by dragging with the Move tool. Copy and save use the full resolution.
+
+**Stitching** (`src/stitch.rs`, covered by unit tests): each row of a frame is hashed (pixels lightly quantised, a possible scrollbar strip on
+the right ignored) and the scroll distance is the shift at which most non-blank rows of two frames are equal; if no shift matches exactly (browsers
+scroll by fractions of a pixel and redraw text a little differently) a tolerant comparison of per-row luma buckets is tried. Only the new strip
+is appended. **Fixed headers and footers** (rows identical at the same position in both frames, such as sticky headers and cookie bars) are left out
+of the search: the header stays once at the top, the footer of the last frame is added once at the bottom.
+
+Limitations: only the page area you select is scrolled, so pages with their own scroll containers need the selection over that container;
+floating elements that cover only part of the width (a "back to top" button, a chat bubble) are copied wherever they happen to be in a frame;
+videos and animations stop the capture; the page's own scrollbar thumb is not stitched specially; windows of elevated programs ignore the
+synthetic wheel input from a non-elevated Snapper. On Linux the feature is X11 only (XTest wheel events and `GetImage`): it is not available on Wayland, so the button, the tray item and the hotkey are hidden there. On Linux there is no Stop bar, only Esc.
+
 ## Tray
 
-On Windows left click starts a capture and right click opens a menu (on Linux the menu opens on any click, as AppIndicator trays do): Take screenshot, Settings, Open screenshots folder, Updates
+On Windows left click starts a capture and right click opens a menu (on Linux the menu opens on any click, as AppIndicator trays do): Take screenshot, Scrolling capture (X11 and Windows), Settings, Open screenshots folder, Updates
 (check now, check on startup) and Exit. The menu follows the chosen theme.
 
 ## Settings
 
 Right-click the tray icon, then **Settings** (or start `Snapper.exe` a second time). Changes apply immediately, no restart.
 
-- **Capture:** hotkey recorder with a live status, format (PNG/JPG), "Also copy to clipboard when saving".
+- **Capture:** hotkey recorder with a live status, the optional scrolling-capture hotkey, format (PNG/JPG), "Also copy to clipboard when saving".
 - **Saving:** screenshots folder with Browse and Open.
 - **System:** Start with Windows (a `HKCU\...\Run` value that reflects the real registry state), check for updates.
   On Linux the switch is "Start when you log in" (`~/.config/autostart/snapper.desktop`).
@@ -130,7 +156,7 @@ Settings > Interface > Theme: System (default, follows the Windows setting live;
 ## Files
 
 - Config: `%APPDATA%\Snapper\config.json` on Windows, `~/.config/Snapper/config.json` on Linux (atomic writes, BOM-tolerant reads). Keys: `hotkey`, `autostart`, `save_dir`, `format`,
-  `copy_on_save`, `language`, `theme`, `check_updates`, `last_color`, `last_stroke`.
+  `copy_on_save`, `language`, `theme`, `check_updates`, `last_color`, `last_stroke`, `scroll_hotkey` (empty by default), `scroll_max_height` (pixels, 30000).
 - Status: `%APPDATA%\Snapper\status.json`: written by the resident process after each hotkey registration so Settings can show the result.
 
 The settings process saves the config and then posts a registered window message (`Snapper.ReloadConfig`) to the resident process,
@@ -148,7 +174,7 @@ cargo test --release
 
 The ready exe is `target/release/Snapper.exe` (`target/release/Snapper` on Linux). `build.rs` embeds the icon, the version info and a Per-Monitor-V2 DPI manifest
 (Windows SDK `rc.exe` on MSVC, `windres` on MinGW).
-Set `SNAPPER_DATA_DIR` to keep the config somewhere else (handy for tests) and `SNAPPER_LOG=1` to get a timing log in that folder.
+Set `SNAPPER_DATA_DIR` to keep the config somewhere else (handy for tests; such an instance also gets its own mutex, window class and messages on Windows, so it runs next to your normal Snapper) and `SNAPPER_LOG=1` to get a timing log in that folder.
 
 ## Release
 

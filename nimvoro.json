@@ -18,6 +18,10 @@
       "text": "Ctrl+C puts the image on the clipboard in formats Discord, Telegram, browsers and Office all accept. Ctrl+S saves it to your folder."
     },
     {
+      "title": "Scrolling capture",
+      "text": "Select a scrollable area, such as a browser page, and Snapper scrolls it and stitches one tall image, keeping sticky headers once. Not available on Wayland."
+    },
+    {
       "title": "Lives in the tray",
       "text": "Global hotkey with a recorder, start with the system, instant overlay, and almost no memory while idle."
     }
@@ -32,7 +36,8 @@
     "assets/screenshots/1.png",
     "assets/screenshots/2.png",
     "assets/screenshots/3.png",
-    "assets/screenshots/4.png"
+    "assets/screenshots/4.png",
+    "assets/screenshots/5.png"
   ],
   "exe": "Snapper.exe",
   "asset": "Snapper-win-x64.zip",
@@ -43,7 +48,7 @@
   "linux": {
     "asset": "Snapper-linux-x64.tar.gz",
     "exe": "snapper",
-    "requirements": "Linux x86_64 (X11 or Wayland) with GTK 3 (libgtk-3-0), libxdo3 and libayatana-appindicator3 for the tray icon (GNOME also needs the AppIndicator extension); wl-clipboard is recommended on Wayland"
+    "requirements": "Linux x86_64 (X11 or Wayland) with GTK 3 (libgtk-3-0), libxdo3 and libayatana-appindicator3 for the tray icon (GNOME also needs the AppIndicator extension); wl-clipboard is recommended on Wayland; scrolling capture works on X11 only (not on Wayland)"
   },
   "requirements": [
     "Windows 10/11 x64"
@@ -68,6 +73,10 @@
           "text": "Ctrl+C кладёт изображение в буфер в форматах, которые понимают Discord, Telegram, браузеры и Office. Ctrl+S сохраняет в вашу папку."
         },
         {
+          "title": "Снимок с прокруткой",
+          "text": "Выделите прокручиваемую область, например страницу в браузере: Snapper сам прокрутит её и склеит один длинный снимок, а закреплённую шапку оставит один раз. В Wayland недоступно."
+        },
+        {
           "title": "Живёт в трее",
           "text": "Глобальная горячая клавиша с записью комбинации, запуск вместе с системой, мгновенное появление и почти нулевое потребление памяти в покое."
         }
@@ -76,7 +85,7 @@
         "Windows 10/11 x64"
       ],
       "linux": {
-        "requirements": "Linux x86_64 (X11 или Wayland) с GTK 3 (libgtk-3-0), libxdo3 и libayatana-appindicator3 для значка в трее (в GNOME нужно расширение AppIndicator); в Wayland рекомендуется wl-clipboard"
+        "requirements": "Linux x86_64 (X11 или Wayland) с GTK 3 (libgtk-3-0), libxdo3 и libayatana-appindicator3 для значка в трее (в GNOME нужно расширение AppIndicator); в Wayland рекомендуется wl-clipboard; снимок с прокруткой работает только в X11 (в Wayland недоступен)"
       }
     },
     "uk": {
@@ -97,6 +106,10 @@
           "text": "Ctrl+C кладе зображення в буфер у форматах, які розуміють Discord, Telegram, браузери та Office. Ctrl+S зберігає у вашу теку."
         },
         {
+          "title": "Знімок із прокруткою",
+          "text": "Виділіть область, що прокручується, наприклад сторінку в браузері: Snapper сам прокрутить її й склеїть один довгий знімок, а закріплену шапку залишить один раз. У Wayland недоступно."
+        },
+        {
           "title": "Живе в треї",
           "text": "Глобальна гаряча клавіша із записом комбінації, запуск разом із системою, миттєва поява та майже нульове споживання пам'яті у спокої."
         }
@@ -105,7 +118,7 @@
         "Windows 10/11 x64"
       ],
       "linux": {
-        "requirements": "Linux x86_64 (X11 або Wayland) з GTK 3 (libgtk-3-0), libxdo3 і libayatana-appindicator3 для значка в треї (у GNOME потрібне розширення AppIndicator); у Wayland рекомендовано wl-clipboard"
+        "requirements": "Linux x86_64 (X11 або Wayland) з GTK 3 (libgtk-3-0), libxdo3 і libayatana-appindicator3 для значка в треї (у GNOME потрібне розширення AppIndicator); у Wayland рекомендовано wl-clipboard; знімок із прокруткою працює лише в X11 (у Wayland недоступний)"
       }
     }
   }

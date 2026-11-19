@@ -77,6 +77,18 @@ pub struct S {
     pub wl_copy: &'static str,
     pub wl_copied: &'static str,
     pub capture_failed: &'static str,
+    pub t_scroll: &'static str,
+    pub t_scroll_wl: &'static str,
+    pub scroll_hotkey: &'static str,
+    pub scroll_hotkey_hint: &'static str,
+    pub scroll_none: &'static str,
+    pub scroll_clear: &'static str,
+    pub scroll_progress: &'static str,
+    pub scroll_stop: &'static str,
+    pub scroll_limit: &'static str,
+    pub scroll_nomatch: &'static str,
+    pub scroll_nothing: &'static str,
+    pub scroll_failed: &'static str,
 }
 
 const EN: S = S {
@@ -149,6 +161,18 @@ const EN: S = S {
     wl_copy: "Copy command",
     wl_copied: "Copied",
     capture_failed: "Could not capture the screen",
+    t_scroll: "Scrolling capture",
+    t_scroll_wl: "Scrolling capture is not available on Wayland",
+    scroll_hotkey: "Scrolling capture hotkey",
+    scroll_hotkey_hint: "Optional. Select a scrollable area and Snapper scrolls it and stitches one tall image",
+    scroll_none: "Not set",
+    scroll_clear: "Clear",
+    scroll_progress: "Scrolling capture: {n} frames, {h} px",
+    scroll_stop: "Stop (Esc)",
+    scroll_limit: "Stopped at the height limit ({h} px). The result is cut there.",
+    scroll_nomatch: "Stopped: the content changed while scrolling (an animation or a video?). Kept what was captured.",
+    scroll_nothing: "Nothing scrolled: the area did not move.",
+    scroll_failed: "Scrolling capture failed",
 };
 
 const RU: S = S {
@@ -221,6 +245,18 @@ const RU: S = S {
     wl_copy: "Копировать команду",
     wl_copied: "Скопировано",
     capture_failed: "Не удалось сделать снимок экрана",
+    t_scroll: "Снимок с прокруткой",
+    t_scroll_wl: "Снимок с прокруткой недоступен в Wayland",
+    scroll_hotkey: "Горячая клавиша снимка с прокруткой",
+    scroll_hotkey_hint: "Необязательно. Выделите прокручиваемую область: Snapper сам прокрутит её и склеит один длинный снимок",
+    scroll_none: "Не задана",
+    scroll_clear: "Очистить",
+    scroll_progress: "Снимок с прокруткой: кадров {n}, высота {h} px",
+    scroll_stop: "Стоп (Esc)",
+    scroll_limit: "Остановлено на пределе высоты ({h} px). Результат обрезан по нему.",
+    scroll_nomatch: "Остановлено: содержимое менялось во время прокрутки (анимация или видео?). Сохранено всё, что успели снять.",
+    scroll_nothing: "Ничего не прокрутилось: область не двигалась.",
+    scroll_failed: "Не удалось сделать снимок с прокруткой",
 };
 
 const UK: S = S {
@@ -293,6 +329,18 @@ const UK: S = S {
     wl_copy: "Копіювати команду",
     wl_copied: "Скопійовано",
     capture_failed: "Не вдалося зробити знімок екрана",
+    t_scroll: "Знімок із прокруткою",
+    t_scroll_wl: "Знімок із прокруткою недоступний у Wayland",
+    scroll_hotkey: "Гаряча клавіша знімка з прокруткою",
+    scroll_hotkey_hint: "Необов'язково. Виділіть область, що прокручується: Snapper сам прокрутить її й склеїть один довгий знімок",
+    scroll_none: "Не задано",
+    scroll_clear: "Очистити",
+    scroll_progress: "Знімок із прокруткою: кадрів {n}, висота {h} px",
+    scroll_stop: "Стоп (Esc)",
+    scroll_limit: "Зупинено на межі висоти ({h} px). Результат обрізано по ній.",
+    scroll_nomatch: "Зупинено: вміст змінювався під час прокрутки (анімація чи відео?). Збережено все, що встигли зняти.",
+    scroll_nothing: "Нічого не прокрутилося: область не рухалась.",
+    scroll_failed: "Не вдалося зробити знімок із прокруткою",
 };
 
 static TABLE: Table<S> = Table { en: &EN, ru: &RU, uk: &UK };

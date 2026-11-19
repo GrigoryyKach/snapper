@@ -15,6 +15,8 @@ pub struct Shot {
     pub rect: Rect,
     pub monitors: Vec<Rect>,
     pub bgra: Vec<u8>,
+    /// Where the picture's top-left corner lies in root-window pixels (X11; zero elsewhere).
+    pub origin: (i32, i32),
 }
 
 impl Shot {
@@ -97,7 +99,7 @@ pub fn grab_x11() -> Result<Shot, String> {
     }
     // Monitors relative to the picture.
     let monitors = monitors.iter().filter_map(|m| m.intersect(&vr)).map(|m| m.offset(-vr.l, -vr.t)).collect();
-    Ok(Shot { rect: rect(0, 0, vr.w(), vr.h()), monitors, bgra })
+    Ok(Shot { rect: rect(0, 0, vr.w(), vr.h()), monitors, bgra, origin: (vr.l, vr.t) })
 }
 
 // ───────────────────────── Wayland: xdg-desktop-portal ─────────────────────────
@@ -147,7 +149,7 @@ pub fn load_png_shot(path: &Path) -> Result<Shot, String> {
         px.swap(0, 2);
         px[3] = 255;
     }
-    Ok(Shot { rect: rect(0, 0, w, h), monitors: vec![rect(0, 0, w, h)], bgra })
+    Ok(Shot { rect: rect(0, 0, w, h), monitors: vec![rect(0, 0, w, h)], bgra, origin: (0, 0) })
 }
 
 // ───────────────────────── hand-off file ─────────────────────────
@@ -193,7 +195,7 @@ pub fn decode_shot(data: &[u8]) -> Option<Shot> {
     if bgra.len() != w as usize * h as usize * 4 {
         return None;
     }
-    Some(Shot { rect: rect(0, 0, w, h), monitors, bgra: bgra.to_vec() })
+    Some(Shot { rect: rect(0, 0, w, h), monitors, bgra: bgra.to_vec(), origin: (0, 0) })
 }
 
 #[cfg(test)]
@@ -211,7 +213,7 @@ mod tests {
 
     #[test]
     fn shot_roundtrip() {
-        let s = Shot { rect: rect(0, 0, 2, 1), monitors: vec![rect(0, 0, 1, 1), rect(1, 0, 2, 1)], bgra: vec![1, 2, 3, 255, 4, 5, 6, 255] };
+        let s = Shot { rect: rect(0, 0, 2, 1), monitors: vec![rect(0, 0, 1, 1), rect(1, 0, 2, 1)], bgra: vec![1, 2, 3, 255, 4, 5, 6, 255], origin: (0, 0) };
         let d = decode_shot(&encode_shot(&s)).unwrap();
         assert_eq!((d.w(), d.h()), (2, 1));
         assert_eq!(d.monitors, s.monitors);

@@ -14,9 +14,28 @@ use windows::Win32::System::Registry::{
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, RegisterWindowMessageW};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-pub const RESIDENT_CLASS: PCWSTR = w!("SnapperResident");
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_VALUE: PCWSTR = w!("Snapper");
+
+/// Empty normally. With `SNAPPER_DATA_DIR` set (tests, a second profile) it names that data folder,
+/// so such an instance never collides with the user's own Snapper: mutexes, the window class and
+/// the registered messages all get this suffix.
+pub fn instance_suffix() -> String {
+    if std::env::var_os("SNAPPER_DATA_DIR").is_none() {
+        return String::new();
+    }
+    let dir = config::data_dir().to_string_lossy().to_lowercase();
+    let mut h: u32 = 0x811c_9dc5;
+    for b in dir.bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    format!(".{h:08x}")
+}
+
+/// NUL-terminated UTF-16 name `base` + the instance suffix.
+pub fn named(base: &str) -> Vec<u16> {
+    wide(&format!("{base}{}", instance_suffix()))
+}
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -86,15 +105,15 @@ pub fn prtsc_snipping_enabled() -> bool {
 // ───────────────────────── resident <-> settings ─────────────────────────
 
 pub fn msg_reload() -> u32 {
-    unsafe { RegisterWindowMessageW(w!("Snapper.ReloadConfig")) }
+    unsafe { RegisterWindowMessageW(PCWSTR(named("Snapper.ReloadConfig").as_ptr())) }
 }
 
 pub fn msg_show_settings() -> u32 {
-    unsafe { RegisterWindowMessageW(w!("Snapper.ShowSettings")) }
+    unsafe { RegisterWindowMessageW(PCWSTR(named("Snapper.ShowSettings").as_ptr())) }
 }
 
 pub fn resident_window() -> Option<HWND> {
-    unsafe { FindWindowW(RESIDENT_CLASS, PCWSTR::null()).ok() }
+    unsafe { FindWindowW(PCWSTR(named("SnapperResident").as_ptr()), PCWSTR::null()).ok() }
 }
 
 /// Tells the resident process to reload the config. Returns `false` if it is not running.

@@ -27,6 +27,8 @@ pub enum Action {
     Copy,
     Save,
     Cancel,
+    /// Start a scrolling capture of the selection (`Done::rect`, picture pixels).
+    Scroll,
 }
 
 impl Action {
@@ -35,14 +37,38 @@ impl Action {
             Action::Copy => "copy",
             Action::Save => "save",
             Action::Cancel => "cancel",
+            Action::Scroll => "scroll",
         }
     }
     pub fn parse(s: &str) -> Action {
         match s {
             "copy" => Action::Copy,
             "save" => Action::Save,
+            "scroll" => Action::Scroll,
             _ => Action::Cancel,
         }
+    }
+}
+
+/// What the overlay process was started for (the `mode` file in its folder).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Normal,
+    /// The first selection starts a scrolling capture at once.
+    Scroll,
+    /// Shows a stitched scrolling capture (a tall picture) for annotating.
+    View,
+}
+
+pub fn mode_file(dir: &Path) -> PathBuf {
+    dir.join("mode")
+}
+
+fn read_mode(dir: &Path) -> Mode {
+    match std::fs::read_to_string(mode_file(dir)).unwrap_or_default().trim() {
+        "scroll" => Mode::Scroll,
+        "view" => Mode::View,
+        _ => Mode::Normal,
     }
 }
 
@@ -52,6 +78,8 @@ pub struct Done {
     pub image: Option<Image>,
     pub color: u32,
     pub stroke: usize,
+    /// The selection for `Action::Scroll`, in picture pixels.
+    pub rect: Option<Rect>,
 }
 
 pub fn out_raw(dir: &Path) -> PathBuf {
@@ -63,18 +91,22 @@ pub fn out_json(dir: &Path) -> PathBuf {
 
 /// Reads the files the overlay process left in `dir`. A missing result means "cancelled".
 pub fn read_result(dir: &Path) -> Done {
-    let cancelled = Done { action: Action::Cancel, image: None, color: 0xff3b30, stroke: 1 };
+    let cancelled = Done { action: Action::Cancel, image: None, color: 0xff3b30, stroke: 1, rect: None };
     let Ok(text) = std::fs::read_to_string(out_json(dir)) else { return cancelled };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return cancelled };
     let action = Action::parse(v.get("action").and_then(|a| a.as_str()).unwrap_or("cancel"));
     let color = v.get("color").and_then(|c| c.as_u64()).unwrap_or(0xff3b30) as u32;
     let stroke = (v.get("stroke").and_then(|c| c.as_u64()).unwrap_or(1) as usize).min(2);
-    let image = if action == Action::Cancel {
+    let rect = v.get("rect").and_then(|r| r.as_array()).and_then(|a| {
+        let n: Vec<i32> = a.iter().filter_map(|x| x.as_i64()).map(|x| x as i32).collect();
+        (n.len() == 4).then(|| crate::geom::rect(n[0], n[1], n[2], n[3]))
+    });
+    let image = if !matches!(action, Action::Copy | Action::Save) {
         None
     } else {
         std::fs::read(out_raw(dir)).ok().and_then(|d| decode_shot(&d)).map(|s| Image { w: s.rect.w() as u32, h: s.rect.h() as u32, bgra: s.bgra })
     };
-    Done { action, image, color, stroke }
+    Done { action, image, color, stroke, rect }
 }
 
 // ───────────────────────── model ─────────────────────────
@@ -93,6 +125,7 @@ enum Tool {
 enum Btn {
     Tool(Tool),
     Color,
+    Scroll,
     Undo,
     Copy,
     Save,
@@ -120,6 +153,8 @@ enum Op {
     Move { start: Pt, orig: Rect },
     Resize { handle: Handle, orig: Rect },
     Draw,
+    /// Dragging the tall picture in the viewer: pointer y (points) and the scroll at the start.
+    Pan { start: f32, scroll: f32 },
 }
 
 struct Toolbar {
@@ -176,6 +211,11 @@ impl View {
 const TILE: i32 = 2048;
 
 struct App {
+    mode: Mode,
+    /// Picture row at the top of the viewer (`Mode::View`).
+    scroll_y: f32,
+    /// Window width in points (viewer layout).
+    view_w: f32,
     lang: Lang,
     dir: PathBuf,
     shot: Shot,
@@ -215,8 +255,13 @@ pub fn run(dir: &Path) -> i32 {
     };
     let cfg = Config::load();
     let lang = i18n::resolve(cfg.language.as_deref());
-    let (w, h) = (shot.rect.w() as f32, shot.rect.h() as f32);
-    let single = shot.monitors.len() <= 1;
+    let mode = read_mode(dir);
+    let (mut w, mut h) = (shot.rect.w() as f32, shot.rect.h() as f32);
+    let mut single = shot.monitors.len() <= 1;
+    if mode == Mode::View {
+        // a tall picture is scrolled inside a normal full-screen window
+        (w, h, single) = (1280.0, 800.0, true);
+    }
     let mut vp = egui::ViewportBuilder::default()
         .with_title("Snapper")
         .with_app_id("snapper-overlay")
@@ -237,7 +282,7 @@ pub fn run(dir: &Path) -> i32 {
         "Snapper",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(App::new(cc, shot, lang, dir, color, stroke)))
+            Ok(Box::new(App::new(cc, shot, lang, dir, color, stroke, mode)))
         }),
     );
     if res.is_err() {
@@ -255,11 +300,15 @@ fn default_font() -> Option<FontArc> {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, shot: Shot, lang: Lang, dir: PathBuf, color: u32, stroke: usize) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, shot: Shot, lang: Lang, dir: PathBuf, color: u32, stroke: usize, mode: Mode) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let vrect = shot.rect;
         let monitors = shot.monitors.clone();
+        let sel = if mode == Mode::View { Some(vrect) } else { None };
         App {
+            mode,
+            scroll_y: 0.0,
+            view_w: 1280.0,
             lang,
             dir,
             font: default_font(),
@@ -267,7 +316,7 @@ impl App {
             view: View { ox: 0.0, oy: 0.0, k: 1.0 },
             vrect,
             monitors,
-            sel: None,
+            sel,
             op: None,
             tool: Tool::Move,
             color,
@@ -327,11 +376,41 @@ impl App {
     }
 
     fn monitor_places(&self) -> Vec<Place> {
-        let size = toolbar_size();
+        let size = toolbar_size(self.scroll_button());
         self.monitors.iter().map(|m| Place { rect: self.view.rect_to_screen(m), toolbar: size }).collect()
     }
 
+    /// Whether the toolbar offers scrolling capture: not in the viewer, and not on Wayland.
+    fn scroll_button(&self) -> bool {
+        self.mode != Mode::View && !crate::sys::is_wayland()
+    }
+
+    /// Picture rows visible below the toolbar band and the band height, in points (viewer only).
+    fn band(&self) -> f32 {
+        (toolbar_size(false).1 + 20) as f32
+    }
+
+    fn view_width(&self) -> f32 {
+        self.view_w
+    }
+
+    fn max_scroll(&self, screen_h: f32) -> f32 {
+        (self.vrect.h() as f32 - (screen_h - self.band()) / self.view.k).max(0.0)
+    }
+
     fn layout(&mut self) {
+        if self.mode == Mode::View {
+            let (w, h) = toolbar_size(false);
+            let sw = self.view_width();
+            let x = ((sw - w as f32) / 2.0).max(0.0) as i32;
+            self.tb = Some(build_toolbar(rect(x, 10, x + w, 10 + h), false));
+            self.popover = if self.popover_open {
+                self.tb.as_ref().map(|tb| build_popover(tb, rect(0, 0, sw as i32, 4000)))
+            } else {
+                None
+            };
+            return;
+        }
         let Some(sel) = self.sel_screen() else {
             self.tb = None;
             self.popover = None;
@@ -343,9 +422,9 @@ impl App {
             return;
         }
         let places = self.monitor_places();
-        let places = if places.is_empty() { vec![Place { rect: self.view.rect_to_screen(&self.vrect), toolbar: toolbar_size() }] } else { places };
+        let places = if places.is_empty() { vec![Place { rect: self.view.rect_to_screen(&self.vrect), toolbar: toolbar_size(self.scroll_button()) }] } else { places };
         if let Some((r, mon)) = place_toolbar(&sel, &places, 8) {
-            let tb = build_toolbar(r);
+            let tb = build_toolbar(r, self.scroll_button());
             self.popover = if self.popover_open { Some(build_popover(&tb, places[mon].rect)) } else { None };
             self.tb = Some(tb);
         }
@@ -406,14 +485,17 @@ impl App {
             return;
         };
         let sel_s = sel_s.unwrap();
-        if let Some(h) = hit_handle(&sel_s, ps, 7) {
-            self.op = Some(Op::Resize { handle: h, orig: sel });
-            return;
+        if self.mode != Mode::View {
+            if let Some(h) = hit_handle(&sel_s, ps, 7) {
+                self.op = Some(Op::Resize { handle: h, orig: sel });
+                return;
+            }
         }
         if !sel_s.contains(ps) {
             return;
         }
         match self.tool {
+            Tool::Move if self.mode == Mode::View => self.op = Some(Op::Pan { start: pos.y, scroll: self.scroll_y }),
             Tool::Move => self.op = Some(Op::Move { start: ip, orig: sel }),
             Tool::Text => {
                 self.commit_text();
@@ -448,6 +530,7 @@ impl App {
                 let q = self.clamp_to(ip, &self.vrect);
                 self.sel = Some(rect(start.x.min(q.x), start.y.min(q.y), start.x.max(q.x) + 1, start.y.max(q.y) + 1));
             }
+            Op::Pan { start, scroll } => self.scroll_y = scroll - (pos.y - start) / self.view.k,
             Op::Move { start, orig } => self.sel = Some(move_rect(&orig, ip.x - start.x, ip.y - start.y, &self.vrect)),
             Op::Resize { handle, orig } => self.sel = Some(resize(&orig, handle, ip, 2, &self.vrect)),
             Op::Draw => {
@@ -478,6 +561,8 @@ impl App {
             Op::Select { .. } => {
                 if self.sel.is_some_and(|r| r.w() < 2 || r.h() < 2) {
                     self.sel = None;
+                } else if self.mode == Mode::Scroll && self.sel.is_some_and(|r| r.w() >= 40 && r.h() >= 40) {
+                    self.action = Some(Action::Scroll);
                 } else {
                     self.tool = Tool::Move;
                 }
@@ -512,6 +597,7 @@ impl App {
                 self.popover_open = !self.popover_open;
                 self.hex_focus = false;
             }
+            Btn::Scroll => self.action = Some(Action::Scroll),
             Btn::Undo => self.undo(),
             Btn::Copy => self.action = Some(Action::Copy),
             Btn::Save => self.action = Some(Action::Save),
@@ -578,6 +664,17 @@ impl App {
             Key::ArrowRight if editing => self.text_move(1),
             Key::Home if editing => self.text_move(-2),
             Key::End if editing => self.text_move(2),
+            Key::PageUp | Key::PageDown | Key::Home | Key::End | Key::ArrowUp | Key::ArrowDown if self.mode == Mode::View => {
+                let page = 700.0 / self.view.k;
+                self.scroll_y += match key {
+                    Key::PageUp => -page,
+                    Key::PageDown => page,
+                    Key::ArrowUp => -60.0 / self.view.k,
+                    Key::ArrowDown => 60.0 / self.view.k,
+                    Key::Home => -1e9,
+                    _ => 1e9,
+                };
+            }
             Key::C if ctrl && self.sel.is_some() && !editing => self.action = Some(Action::Copy),
             Key::S if ctrl && self.sel.is_some() => self.action = Some(Action::Save),
             Key::Z if ctrl && !editing => self.undo(),
@@ -667,7 +764,7 @@ impl App {
         if let Some(op) = self.op {
             return match op {
                 Op::Select { .. } | Op::Draw => CursorIcon::Crosshair,
-                Op::Move { .. } => CursorIcon::Move,
+                Op::Move { .. } | Op::Pan { .. } => CursorIcon::Move,
                 Op::Resize { handle, .. } => resize_cursor(handle),
             };
         }
@@ -675,8 +772,10 @@ impl App {
             return if self.hit_toolbar(p).is_some() { CursorIcon::PointingHand } else { CursorIcon::Default };
         }
         let Some(sel) = self.sel_screen() else { return CursorIcon::Crosshair };
-        if let Some(h) = hit_handle(&sel, p, 7) {
-            return resize_cursor(h);
+        if self.mode != Mode::View {
+            if let Some(h) = hit_handle(&sel, p, 7) {
+                return resize_cursor(h);
+            }
         }
         if sel.contains(p) {
             return match self.tool {
@@ -693,16 +792,18 @@ impl App {
     fn finish(&mut self, ctx: &egui::Context, action: Action) {
         self.commit_text();
         let mut image: Option<Image> = None;
-        if action != Action::Cancel {
+        if matches!(action, Action::Copy | Action::Save) {
             if let Some(sel) = self.sel {
                 image = raster::render_output(&self.shot.bgra, self.shot.w(), &sel, &self.anns, self.font.as_ref()).ok();
             }
         }
         if let Some(img) = &image {
-            let s = Shot { rect: rect(0, 0, img.w as i32, img.h as i32), monitors: vec![], bgra: img.bgra.clone() };
+            let s = Shot { rect: rect(0, 0, img.w as i32, img.h as i32), monitors: vec![], bgra: img.bgra.clone(), origin: (0, 0) };
             let _ = std::fs::write(out_raw(&self.dir), encode_shot(&s));
         }
-        let v = serde_json::json!({ "action": if image.is_some() { action.name() } else { "cancel" }, "color": self.color, "stroke": self.stroke });
+        let rect = if action == Action::Scroll { self.sel.map(|r| [r.l, r.t, r.r, r.b]) } else { None };
+        let keep = image.is_some() || (action == Action::Scroll && rect.is_some());
+        let v = serde_json::json!({ "action": if keep { action.name() } else { "cancel" }, "color": self.color, "stroke": self.stroke, "rect": rect });
         let _ = std::fs::write(out_json(&self.dir), v.to_string());
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
@@ -765,11 +866,13 @@ impl App {
     fn paint(&self, ui: &egui::Ui) {
         let painter = ui.painter();
         let full = ui.max_rect();
-        painter.rect_filled(full, 0.0, Color32::BLACK);
+        painter.rect_filled(full, 0.0, if self.mode == Mode::View { col(0x14161f) } else { Color32::BLACK });
         let all = self.vrect;
         self.draw_region(painter, &all);
         let pic = ERect::from_min_max(self.view.to_screen(0.0, 0.0), self.view.to_screen(all.r as f32, all.b as f32));
-        painter.rect_filled(pic, 0.0, cola(0x000000, 0.45));
+        if self.mode != Mode::View {
+            painter.rect_filled(pic, 0.0, cola(0x000000, 0.45));
+        }
 
         let Some(sel) = self.sel else {
             self.draw_hint(painter, pic);
@@ -791,7 +894,13 @@ impl App {
             }
         }
         painter.rect_stroke(sr.expand(0.5), 0.0, Stroke::new(1.0, col(ACCENT)), StrokeKind::Middle);
-        if !matches!(self.op, Some(Op::Select { .. })) {
+        if self.mode == Mode::View {
+            // band above the picture, so the picture never slides under the toolbar
+            let band = ERect::from_min_max(full.min, pos2(full.right(), full.top() + self.band()));
+            painter.rect_filled(band, 0.0, col(0x14161f));
+            let g = painter.layout_no_wrap(format!("{} \u{00d7} {}", sel.w(), sel.h()), FontId::proportional(12.5), col(0xaab0cf));
+            painter.galley(pos2(18.0, full.top() + (self.band() - g.size().y) / 2.0), g, col(0xaab0cf));
+        } else if !matches!(self.op, Some(Op::Select { .. })) {
             for h in Handle::ALL {
                 let c = handle_point(&ss, h);
                 let r = ERect::from_center_size(pos2(c.x as f32, c.y as f32), vec2(8.0, 8.0));
@@ -799,7 +908,9 @@ impl App {
                 painter.rect_stroke(r, 0.0, Stroke::new(1.0, col(ACCENT)), StrokeKind::Inside);
             }
         }
-        self.draw_label(painter, &sel, &ss, pic);
+        if self.mode != Mode::View {
+            self.draw_label(painter, &sel, &ss, pic);
+        }
         if let Some(tb) = &self.tb {
             self.draw_toolbar(painter, tb);
             if let Some(p) = &self.popover {
@@ -843,7 +954,8 @@ impl App {
     }
 
     fn draw_label(&self, painter: &Painter, sel: &Rect, ss: &Rect, pic: ERect) {
-        let text = format!("{} \u{00d7} {}", sel.w(), sel.h());
+        let size = format!("{} \u{00d7} {}", sel.w(), sel.h());
+        let text = if self.mode == Mode::Scroll { format!("{}  \u{00b7}  {}", strings::tr(self.lang).t_scroll, size) } else { size };
         let g = painter.layout_no_wrap(text, FontId::proportional(12.5), Color32::WHITE);
         let (pw, ph) = (7.0, 4.0);
         let (w, h) = (g.size().x + pw * 2.0, g.size().y + ph * 2.0);
@@ -935,6 +1047,11 @@ impl App {
                 painter.circle_filled(p(12.0, 12.0), 8.0 * k, col(self.color));
                 painter.circle_stroke(p(12.0, 12.0), 8.0 * k, Stroke::new(lw, Color32::WHITE));
             }
+            Btn::Scroll => {
+                line((7.0, 4.0), (17.0, 4.0), lw);
+                line((12.0, 4.5), (12.0, 18.5), lw);
+                wings((12.0, 20.0), (12.0, 13.0), 5.2);
+            }
             Btn::Undo => {
                 let mut prev = None;
                 let mut first = None;
@@ -981,6 +1098,7 @@ impl App {
             Btn::Tool(Tool::Fill) => t.t_fill,
             Btn::Tool(Tool::Text) => t.t_text,
             Btn::Color => t.t_color,
+            Btn::Scroll => t.t_scroll,
             Btn::Undo => t.t_undo,
             Btn::Copy => t.t_copy,
             Btn::Save => t.t_save,
@@ -1055,39 +1173,43 @@ fn e_rect(r: &Rect) -> ERect {
 
 // ───────────────────────── toolbar geometry (points) ─────────────────────────
 
-const ITEMS: [Option<Btn>; 12] = [
-    Some(Btn::Tool(Tool::Move)),
-    Some(Btn::Tool(Tool::Pen)),
-    Some(Btn::Tool(Tool::Arrow)),
-    Some(Btn::Tool(Tool::Rect)),
-    Some(Btn::Tool(Tool::Fill)),
-    Some(Btn::Tool(Tool::Text)),
-    Some(Btn::Color),
-    None,
-    Some(Btn::Undo),
-    Some(Btn::Copy),
-    Some(Btn::Save),
-    Some(Btn::Close),
-];
+/// Toolbar layout; `None` is the separator. `scroll`: include the scrolling-capture button.
+fn items(scroll: bool) -> Vec<Option<Btn>> {
+    let mut v = vec![
+        Some(Btn::Tool(Tool::Move)),
+        Some(Btn::Tool(Tool::Pen)),
+        Some(Btn::Tool(Tool::Arrow)),
+        Some(Btn::Tool(Tool::Rect)),
+        Some(Btn::Tool(Tool::Fill)),
+        Some(Btn::Tool(Tool::Text)),
+        Some(Btn::Color),
+        None,
+    ];
+    if scroll {
+        v.push(Some(Btn::Scroll));
+    }
+    v.extend([Some(Btn::Undo), Some(Btn::Copy), Some(Btn::Save), Some(Btn::Close)]);
+    v
+}
 
 const PAD: i32 = 7;
 const BTN: i32 = 34;
 const GAP: i32 = 3;
 const SEP: i32 = 12;
 
-fn toolbar_size() -> (i32, i32) {
+fn toolbar_size(scroll: bool) -> (i32, i32) {
     let mut x = PAD;
-    for it in ITEMS {
+    for it in items(scroll) {
         x += if it.is_some() { BTN + GAP } else { SEP };
     }
     (x - GAP + PAD, BTN + 2 * PAD)
 }
 
-fn build_toolbar(r: Rect) -> Toolbar {
+fn build_toolbar(r: Rect, scroll: bool) -> Toolbar {
     let mut x = r.l + PAD;
     let mut buttons = Vec::new();
     let mut sep_x = 0;
-    for it in ITEMS {
+    for it in items(scroll) {
         match it {
             Some(b) => {
                 buttons.push((b, rect(x, r.t + PAD, x + BTN, r.t + PAD + BTN)));
@@ -1148,7 +1270,18 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos2(x, y)));
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(w, h)));
         }
-        self.view = View::fit(screen.width(), screen.height(), iw, ih, ppp);
+        if self.mode == Mode::View {
+            // 1:1 when it fits the width, otherwise fitted to the width; scrolled vertically
+            let k = (1.0 / ppp.max(0.1)).min(screen.width() / iw);
+            self.view = View { ox: (screen.width() - iw * k) / 2.0, oy: self.band(), k };
+            let wheel = ctx.input(|i| i.smooth_scroll_delta.y);
+            self.scroll_y -= wheel / k;
+            self.scroll_y = self.scroll_y.clamp(0.0, self.max_scroll(screen.height()));
+            self.view.oy = self.band() - self.scroll_y * k;
+            self.view_w = screen.width();
+        } else {
+            self.view = View::fit(screen.width(), screen.height(), iw, ih, ppp);
+        }
         self.make_tiles(&ctx);
 
         // ----- input -----
@@ -1235,9 +1368,10 @@ mod tests {
 
     #[test]
     fn toolbar_fits_its_buttons() {
-        let (w, h) = toolbar_size();
-        let tb = build_toolbar(rect(100, 100, 100 + w, 100 + h));
-        assert_eq!(tb.buttons.len(), 11);
+        let (w, h) = toolbar_size(true);
+        let tb = build_toolbar(rect(100, 100, 100 + w, 100 + h), true);
+        assert_eq!(tb.buttons.len(), 12);
+        assert_eq!(build_toolbar(rect(0, 0, 900, 90), false).buttons.len(), 11);
         assert!(tb.buttons.iter().all(|(_, r)| tb.rect.contains_rect(r)));
         let pop = build_popover(&tb, rect(0, 0, 1920, 1080));
         assert_eq!((pop.swatches.len(), pop.strokes.len()), (10, 3));
@@ -1246,7 +1380,7 @@ mod tests {
 
     #[test]
     fn action_names_roundtrip() {
-        for a in [Action::Copy, Action::Save, Action::Cancel] {
+        for a in [Action::Copy, Action::Save, Action::Cancel, Action::Scroll] {
             assert_eq!(Action::parse(a.name()), a);
         }
         assert_eq!(Action::parse("garbage"), Action::Cancel);

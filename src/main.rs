@@ -37,11 +37,17 @@ mod raster;
 #[cfg(windows)]
 mod render;
 #[cfg(windows)]
+mod scroll;
+#[cfg(windows)]
 mod resident;
 #[cfg(unix)]
 #[path = "resident_linux.rs"]
 mod resident;
 mod settings;
+mod scrollcore;
+#[cfg(unix)]
+mod scroll_linux;
+mod stitch;
 mod strings;
 mod support;
 #[cfg(windows)]

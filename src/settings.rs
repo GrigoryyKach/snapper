@@ -12,7 +12,7 @@ use crate::theme::{self, Btn, Pal};
 use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, ScrollArea, Ui};
 use std::time::{Duration, Instant};
 #[cfg(windows)]
-use windows::core::w;
+use windows::core::{w, PCWSTR};
 #[cfg(windows)]
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, WPARAM};
 #[cfg(windows)]
@@ -35,7 +35,7 @@ pub fn run() -> eframe::Result<()> {
     }
     #[cfg(windows)]
     unsafe {
-        let m = CreateMutexW(None, true, w!("Local\\Snapper.Settings"));
+        let m = CreateMutexW(None, true, PCWSTR(sys::named("Local\\Snapper.Settings").as_ptr()));
         if m.is_ok() && GetLastError() == ERROR_ALREADY_EXISTS {
             if let Ok(h) = FindWindowW(None, w!("Snapper Settings")) {
                 let _ = ShowWindow(h, SW_RESTORE);
@@ -70,6 +70,9 @@ struct App {
     updater: Updater,
     autostart: bool,
     recording: bool,
+    /// Recording the scrolling-capture hotkey instead of the main one.
+    recording_scroll: bool,
+    scroll_err: Option<HkErr>,
     hk_err: Option<HkErr>,
     /// Hotkey text of the last rejected attempt (to show the Print Screen hint).
     hk_err_for: String,
@@ -96,6 +99,8 @@ impl App {
             updater,
             autostart: sys::autostart_enabled(),
             recording: false,
+            recording_scroll: false,
+            scroll_err: None,
             hk_err: None,
             hk_err_for: String::new(),
             status: sys::read_status(),
@@ -132,6 +137,7 @@ impl App {
             let egui::Event::Key { key, pressed, modifiers, repeat: false, .. } = ev else { continue };
             if key == egui::Key::Escape {
                 self.recording = false;
+                self.recording_scroll = false;
                 return;
             }
             let Some(vk) = key_to_vk(key) else { continue };
@@ -148,8 +154,14 @@ impl App {
             if modifiers.shift {
                 mods |= MOD_SHIFT;
             }
+            let scroll = self.recording_scroll;
             self.recording = false;
-            self.set_hotkey(Hotkey { mods, vk });
+            self.recording_scroll = false;
+            if scroll {
+                self.set_scroll_hotkey(Hotkey { mods, vk });
+            } else {
+                self.set_hotkey(Hotkey { mods, vk });
+            }
             return;
         }
     }
@@ -174,6 +186,69 @@ impl App {
         } else {
             self.hk_err = Some(HkErr::Taken);
         }
+    }
+
+    /// Validates and saves the optional scrolling-capture hotkey.
+    fn set_scroll_hotkey(&mut self, hk: Hotkey) {
+        let text = hk.format();
+        if hk.mods == 0 && !hotkey::allowed_without_modifier(hk.vk) {
+            self.scroll_err = Some(HkErr::Unsupported);
+            return;
+        }
+        if text == self.cfg.scroll_hotkey {
+            self.scroll_err = None;
+            return;
+        }
+        if text == self.cfg.hotkey || !try_register(&hk) {
+            self.scroll_err = Some(HkErr::Taken);
+            return;
+        }
+        self.scroll_err = None;
+        self.cfg.scroll_hotkey = text;
+        self.apply();
+    }
+
+    /// The optional hotkey that starts a scrolling capture directly.
+    fn scroll_row(&mut self, ui: &mut Ui, p: &Pal) {
+        let t = self.s();
+        ui.add_space(6.0);
+        let w = ui.available_width();
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(w - 190.0);
+                ui.label(RichText::new(t.scroll_hotkey).font(theme::reg(14.0)).color(p.text));
+                ui.add_space(-6.0);
+                theme::hint(ui, t.scroll_hotkey_hint, p);
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if theme::button(ui, t.record, Btn::Soft, p).clicked() {
+                    self.recording_scroll = true;
+                    self.recording = false;
+                    self.scroll_err = None;
+                }
+                ui.add_space(4.0);
+                let label = if self.recording_scroll {
+                    "\u{2026}".to_string()
+                } else if self.cfg.scroll_hotkey.is_empty() {
+                    t.scroll_none.to_string()
+                } else {
+                    self.cfg.scroll_hotkey.clone()
+                };
+                key_chip(ui, &label, self.recording_scroll, p);
+            });
+        });
+        if self.recording_scroll {
+            ui.label(RichText::new(t.recording).font(theme::reg(12.5)).color(p.accent));
+        } else if let Some(e) = self.scroll_err {
+            let msg = if e == HkErr::Taken { t.hk_taken } else { t.hk_unsupported };
+            ui.label(RichText::new(msg).font(theme::reg(12.5)).color(Color32::from_rgb(0xe0, 0x4f, 0x4f)));
+        }
+        if !self.cfg.scroll_hotkey.is_empty() && theme::button(ui, t.scroll_clear, Btn::Link, p).clicked() {
+            self.cfg.scroll_hotkey.clear();
+            self.scroll_err = None;
+            self.apply();
+        }
+        ui.add_space(6.0);
     }
 
     fn header(&self, ui: &mut Ui, p: &Pal) {
@@ -224,9 +299,13 @@ impl App {
             self.wayland_block(ui, p);
         } else {
             self.hotkey_rows(ui, p);
+            self.scroll_row(ui, p);
         }
         #[cfg(windows)]
-        self.hotkey_rows(ui, p);
+        {
+            self.hotkey_rows(ui, p);
+            self.scroll_row(ui, p);
+        }
         self.format_rows(ui, p);
     }
 
@@ -271,6 +350,7 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if theme::button(ui, t.record, Btn::Soft, p).clicked() {
                     self.recording = true;
+                    self.recording_scroll = false;
                     self.hk_err = None;
                 }
                 ui.add_space(4.0);
@@ -467,7 +547,7 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
-        if self.recording {
+        if self.recording || self.recording_scroll {
             self.record_step(ctx);
             ctx.request_repaint_after(Duration::from_millis(100));
         } else {

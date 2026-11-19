@@ -26,6 +26,10 @@ impl Format {
 pub struct Config {
     /// Trigger hotkey, e.g. `PrintScreen` or `Ctrl+Shift+S`.
     pub hotkey: String,
+    /// Optional hotkey for scrolling capture; empty means none.
+    pub scroll_hotkey: String,
+    /// Height limit of a scrolling capture in pixels.
+    pub scroll_max_height: u32,
     pub autostart: bool,
     /// Folder for saved screenshots; empty means `%USERPROFILE%\Pictures\Snapper`.
     pub save_dir: String,
@@ -45,6 +49,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: "PrintScreen".into(),
+            scroll_hotkey: String::new(),
+            scroll_max_height: 30_000,
             autostart: false,
             save_dir: String::new(),
             format: Format::Png,
@@ -98,6 +104,7 @@ impl Config {
     pub fn load_from(path: &Path) -> Self {
         let mut cfg = std::fs::read_to_string(path).ok().and_then(|t| parse(&t)).unwrap_or_default();
         cfg.last_stroke = cfg.last_stroke.min(2);
+        cfg.scroll_max_height = cfg.scroll_max_height.clamp(2_000, 60_000);
         cfg
     }
 

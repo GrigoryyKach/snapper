@@ -9,7 +9,9 @@ use crate::hotkey::{Hotkey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use crate::i18n::{self, Lang};
 use crate::nimvoro::{UpdateState, Updater};
 use crate::support;
+use crate::geom::Rect;
 use crate::overlay::{self, Action, Done, Params};
+use crate::scroll;
 use crate::strings;
 use crate::sys::{self, wide};
 use crate::theme::ThemeMode;
@@ -29,13 +31,17 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_UPDATE_DONE: u32 = WM_APP + 2;
+const WM_SCROLL_DONE: u32 = WM_APP + 3;
 const HOTKEY_ID: i32 = 1;
+const HOTKEY_SCROLL_ID: i32 = 2;
 const TIMER_CAPTURE: usize = 1;
 const TIMER_PREWARM: usize = 2;
+const TIMER_SCROLL: usize = 3;
 const NIN_SELECT_: u32 = 0x400;
 const NIN_BALLOONUSERCLICK_: u32 = 0x405;
 
 const ID_TAKE: usize = 1;
+const ID_SCROLL: usize = 4;
 const ID_SETTINGS: usize = 2;
 const ID_FOLDER: usize = 3;
 const ID_CHECK_NOW: usize = 10;
@@ -65,6 +71,8 @@ struct State {
     msg_settings: u32,
     msg_taskbar: u32,
     announced_update: bool,
+    /// A scrolling capture is running: its shared state and the area it grabs.
+    scroll: Option<(std::sync::Arc<scroll::Shared>, Rect)>,
 }
 
 thread_local! {
@@ -79,7 +87,7 @@ pub fn run() -> i32 {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         // Single instance: a second launch just asks the first one to open Settings.
-        let mutex = CreateMutexW(None, true, w!("Local\\Snapper.Resident"));
+        let mutex = CreateMutexW(None, true, PCWSTR(sys::named("Local\\Snapper.Resident").as_ptr()));
         if mutex.is_ok() && GetLastError() == ERROR_ALREADY_EXISTS {
             if let Some(h) = sys::resident_window() {
                 let _ = PostMessageW(Some(h), sys::msg_show_settings(), WPARAM(0), LPARAM(0));
@@ -97,17 +105,18 @@ pub fn run() -> i32 {
         }
 
         let hinst = GetModuleHandleW(None).unwrap_or_default();
+        let class_name = sys::named("SnapperResident");
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: hinst.into(),
-            lpszClassName: sys::RESIDENT_CLASS,
+            lpszClassName: PCWSTR(class_name.as_ptr()),
             ..Default::default()
         };
         RegisterClassExW(&wc);
         let Ok(hwnd) = CreateWindowExW(
             WS_EX_TOOLWINDOW,
-            sys::RESIDENT_CLASS,
+            PCWSTR(class_name.as_ptr()),
             w!("Snapper"),
             WS_POPUP,
             0,
@@ -135,6 +144,7 @@ pub fn run() -> i32 {
             msg_settings: sys::msg_show_settings(),
             msg_taskbar: RegisterWindowMessageW(w!("TaskbarCreated")),
             announced_update: false,
+            scroll: None,
         };
         STATE.with(|s| *s.borrow_mut() = Some(state));
 
@@ -174,12 +184,21 @@ fn trim_memory() {
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_HOTKEY => {
-            start_capture();
+            start_capture(wp.0 as i32 == HOTKEY_SCROLL_ID);
+            return LRESULT(0);
+        }
+        WM_SCROLL_DONE => {
+            scroll_done();
+            return LRESULT(0);
+        }
+        WM_TIMER if wp.0 == TIMER_SCROLL => {
+            let _ = KillTimer(Some(hwnd), TIMER_SCROLL);
+            start_capture(true);
             return LRESULT(0);
         }
         WM_TIMER if wp.0 == TIMER_CAPTURE => {
             let _ = KillTimer(Some(hwnd), TIMER_CAPTURE);
-            start_capture();
+            start_capture(false);
             return LRESULT(0);
         }
         WM_TIMER if wp.0 == TIMER_PREWARM => {
@@ -241,8 +260,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
 // ───────────────────────── capture ─────────────────────────
 
-fn start_capture() {
-    if overlay::is_active() {
+fn start_capture(scroll: bool) {
+    if overlay::is_active() || with(|s| s.scroll.is_some()).unwrap_or(true) {
         return;
     }
     let Some((lang, color, stroke)) = with(|s| {
@@ -251,7 +270,46 @@ fn start_capture() {
     }) else {
         return;
     };
-    overlay::start(Params { lang, color, stroke });
+    overlay::start(Params { lang, color, stroke, scroll });
+}
+
+/// Starts the scrolling capture of `area` (the overlay is already gone).
+fn start_scroll(area: Rect) {
+    let Some((hwnd, max_rows, lang)) = with(|s| (s.hwnd, s.cfg.scroll_max_height as usize, s.lang)) else { return };
+    let shared = scroll::spawn(area, max_rows, hwnd, WM_SCROLL_DONE);
+    scroll::show_hud(shared.clone(), lang, area);
+    with(|s| s.scroll = Some((shared, area)));
+}
+
+/// The worker finished: open the stitched picture in the viewer and say what happened.
+fn scroll_done() {
+    scroll::close_hud();
+    let Some(Some((shared, area))) = with(|s| s.scroll.take()) else { return };
+    let outcome = shared.outcome.lock().ok().and_then(|mut o| o.take());
+    let Some((lang, color, stroke)) = with(|s| (s.lang, config::parse_hex_color(&s.cfg.last_color).unwrap_or(0xff3b30), s.cfg.last_stroke as usize)) else {
+        return;
+    };
+    let t = strings::tr(lang);
+    let Some(outcome) = outcome else { return };
+    let rows = outcome.image.as_ref().map_or(0, |i| i.h);
+    crate::sys::log(&format!("scroll done: {:?}, {rows} rows", outcome.note));
+    let note = match outcome.note {
+        scroll::Note::None => None,
+        scroll::Note::Limit => Some(t.scroll_limit.replace("{h}", &rows.to_string())),
+        scroll::Note::NoMatch => Some(t.scroll_nomatch.to_string()),
+        scroll::Note::Nothing => Some(t.scroll_nothing.to_string()),
+        scroll::Note::Failed => Some(t.scroll_failed.to_string()),
+    };
+    let mut ok = false;
+    if let Some(img) = outcome.image {
+        ok = overlay::start_view(Params { lang, color, stroke, scroll: false }, img, area);
+    }
+    if !ok && note.is_none() {
+        with(|s| balloon(s, "Snapper", t.scroll_failed, BalloonKind::None));
+    }
+    if let Some(n) = note {
+        with(|s| balloon(s, "Snapper", &n, BalloonKind::None));
+    }
 }
 
 /// Called by the overlay when it closes.
@@ -268,8 +326,15 @@ pub fn capture_done(d: Done) {
         s.cfg.last_color = disk.last_color.clone();
         s.cfg.last_stroke = disk.last_stroke;
     });
+    if d.action == Action::Scroll {
+        if let Some(r) = d.rect {
+            start_scroll(r);
+        }
+        return;
+    }
     if let Some(img) = &d.image {
         match d.action {
+            Action::Scroll => {}
             Action::Copy => {
                 if crate::clipboard::copy_image(img).is_err() {
                     with(|s| balloon(s, "Snapper", strings::tr(s.lang).copy_failed, BalloonKind::None));
@@ -356,6 +421,7 @@ fn register_hotkey(notify: bool) {
     let hk = Hotkey::parse(&text).unwrap_or_default();
     let mods = hk.mods & (MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN);
     let ok = unsafe { RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(mods | 0x4000), hk.vk).is_ok() };
+    register_scroll_hotkey(hwnd, lang);
     with(|s| s.hotkey_ok = ok);
     sys::write_status(&text, ok);
     update_tray_tip();
@@ -368,6 +434,22 @@ fn register_hotkey(notify: bool) {
         with(|s| balloon(s, t.hk_failed_title, &body, BalloonKind::Settings));
     }
     let _ = notify;
+}
+
+/// The optional scrolling-capture hotkey; a conflict is reported like the main hotkey.
+fn register_scroll_hotkey(hwnd: HWND, lang: Lang) {
+    unsafe {
+        let _ = UnregisterHotKey(Some(hwnd), HOTKEY_SCROLL_ID);
+    }
+    let Some(text) = with(|s| s.cfg.scroll_hotkey.clone()) else { return };
+    let Some(hk) = Hotkey::parse(&text) else { return };
+    let mods = hk.mods & (MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN);
+    let ok = unsafe { RegisterHotKey(Some(hwnd), HOTKEY_SCROLL_ID, HOT_KEY_MODIFIERS(mods | 0x4000), hk.vk).is_ok() };
+    if !ok {
+        let t = strings::tr(lang);
+        let body = t.hk_failed_body.replace("{hk}", &hk.format());
+        with(|s| balloon(s, t.hk_failed_title, &body, BalloonKind::Settings));
+    }
 }
 
 // ───────────────────────── tray ─────────────────────────
@@ -471,8 +553,8 @@ fn apply_menu_theme() {
 
 fn show_menu(hwnd: HWND) {
     apply_menu_theme();
-    let Some((lang, hotkey, check_start, state, status)) =
-        with(|s| (s.lang, s.cfg.hotkey.clone(), s.cfg.check_updates, s.updater.state(), s.updater.status_text(s.lang)))
+    let Some((lang, hotkey, scroll_hk, check_start, state, status)) =
+        with(|s| (s.lang, s.cfg.hotkey.clone(), s.cfg.scroll_hotkey.clone(), s.cfg.check_updates, s.updater.state(), s.updater.status_text(s.lang)))
     else {
         return;
     };
@@ -485,6 +567,8 @@ fn show_menu(hwnd: HWND) {
             let _ = AppendMenuW(m, flags, id, PCWSTR(w.as_ptr()));
         };
         item(menu, MF_STRING, ID_TAKE, &format!("{}\t{}", t.tray_take, hotkey));
+        let scroll_label = if scroll_hk.trim().is_empty() { t.t_scroll.to_string() } else { format!("{}\t{}", t.t_scroll, scroll_hk) };
+        item(menu, MF_STRING, ID_SCROLL, &scroll_label);
         item(menu, MF_STRING, ID_SETTINGS, t.tray_settings);
         item(menu, MF_STRING, ID_FOLDER, t.tray_folder);
         // Updates submenu
@@ -511,6 +595,9 @@ fn show_menu(hwnd: HWND) {
         match cmd.0 as usize {
             ID_TAKE => {
                 let _ = SetTimer(Some(hwnd), TIMER_CAPTURE, 200, None);
+            }
+            ID_SCROLL => {
+                let _ = SetTimer(Some(hwnd), TIMER_SCROLL, 200, None);
             }
             ID_SETTINGS => open_settings(),
             ID_FOLDER => {
@@ -569,6 +656,10 @@ fn open_settings() {
 
 fn quit() {
     overlay::cancel();
+    if let Some(Some((sh, _))) = with(|s| s.scroll.clone()) {
+        sh.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    scroll::close_hud();
     if let Some(h) = with(|s| s.hwnd) {
         unsafe {
             let _ = DestroyWindow(h);

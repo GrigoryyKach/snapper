@@ -31,6 +31,8 @@ pub enum Action {
     Copy,
     Save,
     Cancel,
+    /// Start a scrolling capture of the selected area (`Done::rect`).
+    Scroll,
 }
 
 /// What the resident process receives when the overlay closes.
@@ -39,12 +41,16 @@ pub struct Done {
     pub image: Option<Image>,
     pub color: u32,
     pub stroke: usize,
+    /// The selection, for `Action::Scroll`.
+    pub rect: Option<Rect>,
 }
 
 pub struct Params {
     pub lang: Lang,
     pub color: u32,
     pub stroke: usize,
+    /// Start in scrolling-capture mode: the first selection starts the scroll at once.
+    pub scroll: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,6 +67,7 @@ enum Tool {
 enum Btn {
     Tool(Tool),
     Color,
+    Scroll,
     Undo,
     Copy,
     Save,
@@ -90,6 +97,38 @@ enum Op {
     Move { start: Pt, orig: Rect },
     Resize { handle: Handle, orig: Rect },
     Draw,
+    /// Dragging the tall image in the scrolling-capture viewer.
+    Pan { start: Pt, scroll: f32 },
+}
+
+/// Rows per GPU tile of the tall image (Direct2D bitmaps have a size limit).
+const TILE: i32 = 2048;
+
+/// The viewer of a stitched scrolling capture: the image is shown 1:1 (or fitted to the width) and
+/// scrolled with the wheel. Annotations live in image pixels.
+struct View {
+    img: Option<Image>,
+    iw: i32,
+    ih: i32,
+    tiles: Vec<Option<ID2D1Bitmap>>,
+    /// The part of the monitor below the toolbar band.
+    vp: Rect,
+    z: f32,
+    /// Image row shown at the top of the viewport.
+    scroll: f32,
+    ox: i32,
+}
+
+impl View {
+    fn max_scroll(&self) -> f32 {
+        (self.ih as f32 - self.vp.h() as f32 / self.z).max(0.0)
+    }
+
+    fn display(&self) -> Rect {
+        let w = (self.iw as f32 * self.z).round() as i32;
+        let h = ((self.ih as f32 - self.scroll) * self.z).round().min(self.vp.h() as f32) as i32;
+        rect(self.ox, self.vp.t, self.ox + w, self.vp.t + h.max(1))
+    }
 }
 
 struct Toolbar {
@@ -117,7 +156,9 @@ struct TextEdit {
 struct Session {
     gfx: Rc<Gfx>,
     lang: Lang,
-    cap: Capture,
+    cap: Option<Capture>,
+    view: Option<View>,
+    scroll_mode: bool,
     vrect: Rect,
     mons: Vec<Mon>,
     sel: Option<Rect>,
@@ -279,7 +320,9 @@ pub fn start(params: Params) -> bool {
     let session = Session {
         gfx,
         lang: params.lang,
-        cap,
+        cap: Some(cap),
+        view: None,
+        scroll_mode: params.scroll,
         vrect,
         mons,
         sel: None,
@@ -327,6 +370,78 @@ pub fn start(params: Params) -> bool {
     true
 }
 
+/// Opens the stitched scrolling capture in the viewer on the monitor that holds `near`.
+pub fn start_view(params: Params, img: Image, near: Rect) -> bool {
+    if is_active() || img.w == 0 || img.h == 0 {
+        return false;
+    }
+    let Some(gfx) = gfx() else { return false };
+    let monitors: Vec<Monitor> = capture::monitors();
+    let c = near.center();
+    let Some(m) = monitors.iter().find(|m| m.rect.contains(c)).or(monitors.first()).copied() else { return false };
+    register_class();
+    let hwnd = unsafe {
+        let hinst = GetModuleHandleW(None).unwrap_or_default();
+        CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, CLASS, w!("Snapper"), WS_POPUP, m.rect.l, m.rect.t, m.rect.w(), m.rect.h(), None, None, Some(hinst.into()), None)
+    };
+    let Ok(hwnd) = hwnd else { return false };
+    let s = m.scale();
+    let (_, th) = toolbar_size(s, true);
+    let band = th + 2 * (10.0 * s).round() as i32;
+    let vp = rect(m.rect.l, m.rect.t + band, m.rect.r, m.rect.b);
+    let (iw, ih) = (img.w as i32, img.h as i32);
+    let z = (vp.w() as f32 / iw as f32).min(1.0);
+    let ox = vp.l + ((vp.w() as f32 - iw as f32 * z) / 2.0).round() as i32;
+    let tiles = (0..(ih + TILE - 1) / TILE).map(|_| None).collect();
+    let view = View { img: Some(img), iw, ih, tiles, vp, z, scroll: 0.0, ox };
+    let mut cursor = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut cursor);
+    }
+    let session = Session {
+        gfx,
+        lang: params.lang,
+        cap: None,
+        view: Some(view),
+        scroll_mode: false,
+        vrect: m.rect,
+        mons: vec![Mon { hwnd, rect: m.rect, scale: s, rt: None, bmp: None, pen: None }],
+        sel: None,
+        op: None,
+        tool: Tool::Move,
+        color: params.color,
+        stroke: params.stroke.min(2),
+        anns: Vec::new(),
+        redo: Vec::new(),
+        cur: None,
+        text: None,
+        tb: None,
+        hover: None,
+        popover: None,
+        popover_open: false,
+        hex: format_hex_color(params.color),
+        hex_focus: false,
+        cursor: pt(cursor.x, cursor.y),
+        draw_start: None,
+        started: Instant::now(),
+        high_surrogate: None,
+    };
+    SESSION.with(|c| *c.borrow_mut() = Some(session));
+    SESSION.with(|c| {
+        let mut b = c.borrow_mut();
+        let s = b.as_mut().unwrap();
+        s.layout();
+        s.ensure_target(0);
+        s.paint(0);
+        unsafe {
+            let m = &s.mons[0];
+            let _ = SetWindowPos(m.hwnd, Some(HWND_TOPMOST), m.rect.l, m.rect.t, m.rect.w(), m.rect.h(), SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            force_foreground(m.hwnd);
+        }
+    });
+    true
+}
+
 /// Makes `hwnd` the foreground window even when Windows would refuse a plain `SetForegroundWindow`.
 unsafe fn force_foreground(hwnd: HWND) {
     let _ = SetForegroundWindow(hwnd);
@@ -355,15 +470,16 @@ fn finish(action: Action) {
         let _ = ReleaseCapture();
     }
     s.hide();
-    let image = if action != Action::Cancel {
+    let image = if matches!(action, Action::Copy | Action::Save) {
         s.commit_text();
         s.render_image()
     } else {
         None
     };
+    let rect = if action == Action::Scroll { s.sel } else { None };
     let (color, stroke) = (s.color, s.stroke);
     drop(s);
-    crate::resident::capture_done(Done { action, image, color, stroke });
+    crate::resident::capture_done(Done { action, image, color, stroke, rect });
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -436,8 +552,10 @@ impl Session {
             return;
         }
         let (hwnd, mr) = (self.mons[i].hwnd, self.mons[i].rect);
-        let stride = self.cap.stride();
-        let offset = (mr.t - self.vrect.t) as usize * stride + (mr.l - self.vrect.l) as usize * 4;
+        let (stride, offset, base_ptr) = match &self.cap {
+            Some(c) => (c.stride(), (mr.t - self.vrect.t) as usize * c.stride() + (mr.l - self.vrect.l) as usize * 4, c.ptr()),
+            None => (0, 0, std::ptr::null()),
+        };
         unsafe {
             let props = D2D1_RENDER_TARGET_PROPERTIES {
                 r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
@@ -460,9 +578,20 @@ impl Session {
                 }
             };
             let base: ID2D1RenderTarget = rt.clone().into();
+            if let Some(v) = self.view.as_mut() {
+                // the viewer makes its tile bitmaps lazily while painting
+                for t in v.tiles.iter_mut() {
+                    *t = None;
+                }
+                if let Ok(pen) = Pen::new(&self.gfx, &base) {
+                    self.mons[i].rt = Some(rt);
+                    self.mons[i].pen = Some(pen);
+                }
+                return;
+            }
             let bmp = base.CreateBitmap(
                 D2D_SIZE_U { width: mr.w() as u32, height: mr.h() as u32 },
-                Some(self.cap.ptr().add(offset) as *const _),
+                Some(base_ptr.add(offset) as *const _),
                 stride as u32,
                 &bitmap_props(),
             );
@@ -499,6 +628,14 @@ impl Session {
     }
 
     fn invalidate(&self, r: Option<Rect>) {
+        if self.view.is_some() {
+            for m in &self.mons {
+                unsafe {
+                    let _ = InvalidateRect(Some(m.hwnd), None, false);
+                }
+            }
+            return;
+        }
         let Some(r) = r else { return };
         for m in &self.mons {
             if m.rect.intersect(&r).is_some() {
@@ -525,6 +662,10 @@ impl Session {
     // ───────────────────────── toolbar layout ─────────────────────────
 
     fn layout(&mut self) {
+        if self.view.is_some() {
+            self.layout_view();
+            return;
+        }
         let Some(sel) = self.sel else {
             self.tb = None;
             self.popover = None;
@@ -535,10 +676,10 @@ impl Session {
             self.popover = None;
             return;
         }
-        let places: Vec<Place> = self.mons.iter().map(|m| Place { rect: m.rect, toolbar: toolbar_size(m.scale) }).collect();
+        let places: Vec<Place> = self.mons.iter().map(|m| Place { rect: m.rect, toolbar: toolbar_size(m.scale, false) }).collect();
         let gap = (8.0 * self.scale_at(pt(sel.r - 1, sel.b - 1))) as i32;
         if let Some((r, mon)) = place_toolbar(&sel, &places, gap) {
-            self.tb = Some(build_toolbar(r, mon, self.mons[mon].scale));
+            self.tb = Some(build_toolbar(r, mon, self.mons[mon].scale, false));
         }
         self.popover = if self.popover_open { self.tb.as_ref().map(|tb| build_popover(tb, self.mons[tb.mon].rect)) } else { None };
     }
@@ -597,7 +738,15 @@ impl Session {
             }
             WM_LBUTTONUP => {
                 let p = self.point_of(hwnd, lp);
-                self.on_up(p);
+                self.on_up(p, action);
+                Some(LRESULT(0))
+            }
+            WM_MOUSEWHEEL => {
+                if self.view.is_some() {
+                    let delta = ((wp.0 >> 16) & 0xffff) as u16 as i16 as f32;
+                    let z = self.view.as_ref().map_or(1.0, |v| v.z);
+                    self.mutate(|s| s.scroll_by(-delta / 120.0 * 110.0 / z));
+                }
                 Some(LRESULT(0))
             }
             WM_RBUTTONDOWN => {
@@ -649,7 +798,7 @@ impl Session {
         if let Some(op) = self.op {
             return match op {
                 Op::Select { .. } | Op::Draw => IDC_CROSS,
-                Op::Move { .. } => IDC_SIZEALL,
+                Op::Move { .. } | Op::Pan { .. } => IDC_SIZEALL,
                 Op::Resize { handle, .. } => resize_cursor(handle),
             };
         }
@@ -657,8 +806,10 @@ impl Session {
             return if self.hit_toolbar(p).is_some() { IDC_HAND } else { IDC_ARROW };
         }
         let Some(sel) = self.sel else { return IDC_CROSS };
-        if let Some(h) = hit_handle(&sel, p, self.handle_half(p) + 3) {
-            return resize_cursor(h);
+        if self.view.is_none() {
+            if let Some(h) = hit_handle(&sel, p, self.handle_half(p) + 3) {
+                return resize_cursor(h);
+            }
         }
         if sel.contains(p) {
             return match self.tool {
@@ -722,9 +873,11 @@ impl Session {
             });
             return;
         };
-        if let Some(h) = hit_handle(&sel, p, self.handle_half(p) + 3) {
-            self.op = Some(Op::Resize { handle: h, orig: sel });
-            return;
+        if self.view.is_none() {
+            if let Some(h) = hit_handle(&sel, p, self.handle_half(p) + 3) {
+                self.op = Some(Op::Resize { handle: h, orig: sel });
+                return;
+            }
         }
         if !sel.contains(p) {
             unsafe {
@@ -733,13 +886,19 @@ impl Session {
             return;
         }
         match self.tool {
-            Tool::Move => self.op = Some(Op::Move { start: p, orig: sel }),
+            Tool::Move => {
+                self.op = Some(match &self.view {
+                    Some(v) => Op::Pan { start: p, scroll: v.scroll },
+                    None => Op::Move { start: p, orig: sel },
+                })
+            }
             Tool::Text => {
                 if self.text.is_some() {
                     self.mutate(|s| s.commit_text());
                 }
+                let pos = self.ann_pt(p, 0.0);
                 self.mutate(|s| {
-                    s.text = Some(TextEdit { pos: (p.x as f32, p.y as f32), text: String::new(), caret: 0 });
+                    s.text = Some(TextEdit { pos, text: String::new(), caret: 0 });
                 });
                 unsafe {
                     let _ = ReleaseCapture();
@@ -747,7 +906,7 @@ impl Session {
                 self.place_ime(hwnd);
             }
             t => {
-                let q = (p.x as f32 + 0.5, p.y as f32 + 0.5);
+                let q = self.ann_pt(p, 0.5);
                 let w = STROKES[self.stroke];
                 let c = self.color;
                 self.cur = Some(match t {
@@ -791,10 +950,18 @@ impl Session {
                 let vr = self.vrect;
                 self.mutate(|s| s.sel = Some(resize(&orig, handle, p, 2, &vr)));
             }
+            Op::Pan { start, scroll } => {
+                let z = self.view.as_ref().map_or(1.0, |v| v.z);
+                self.mutate(|s| {
+                    if let Some(v) = s.view.as_mut() {
+                        v.scroll = scroll - (p.y - start.y) as f32 / z;
+                    }
+                });
+            }
             Op::Draw => {
                 let Some(sel) = self.sel else { return };
                 let q = self.clamp_to(p, &sel);
-                let q = (q.x as f32 + 0.5, q.y as f32 + 0.5);
+                let q = self.ann_pt(q, 0.5);
                 let start = self.draw_start.unwrap_or(q);
                 match &mut self.cur {
                     Some(Ann::Pen { pts, .. }) => {
@@ -812,11 +979,15 @@ impl Session {
         }
     }
 
-    fn on_up(&mut self, p: Pt) {
+    fn on_up(&mut self, p: Pt, action: &mut Option<Action>) {
         let Some(op) = self.op else { return };
         self.on_move(p);
         unsafe {
             let _ = ReleaseCapture();
+        }
+        if self.scroll_mode && matches!(op, Op::Select { .. }) && self.sel.is_some_and(|r| r.w() >= 40 && r.h() >= 40) {
+            *action = Some(Action::Scroll);
+            return;
         }
         self.mutate(|s| {
             s.op = None;
@@ -861,6 +1032,7 @@ impl Session {
                 s.popover_open = !s.popover_open;
                 s.hex_focus = false;
             }),
+            Btn::Scroll => *action = Some(Action::Scroll),
             Btn::Undo => self.mutate(|s| s.undo()),
             Btn::Copy => *action = Some(Action::Copy),
             Btn::Save => *action = Some(Action::Save),
@@ -932,6 +1104,18 @@ impl Session {
             VK_RIGHT if editing => self.mutate(|s| s.text_move(1)),
             VK_HOME if editing => self.mutate(|s| s.text_move(-2)),
             VK_END if editing => self.mutate(|s| s.text_move(2)),
+            VK_PRIOR | VK_NEXT | VK_UP | VK_DOWN | VK_HOME | VK_END if self.view.is_some() => {
+                let (page, z) = self.view.as_ref().map_or((0.0, 1.0), |v| (v.vp.h() as f32 * 0.9, v.z));
+                let d = match vk {
+                    VK_PRIOR => -page / z,
+                    VK_NEXT => page / z,
+                    VK_UP => -60.0 / z,
+                    VK_DOWN => 60.0 / z,
+                    VK_HOME => -1e9,
+                    _ => 1e9,
+                };
+                self.mutate(|s| s.scroll_by(d));
+            }
             _ if ctrl => match vk.0 {
                 0x43 => {
                     if self.sel.is_some() {
@@ -1050,7 +1234,7 @@ impl Session {
 
     fn place_ime(&self, hwnd: HWND) {
         let (Some(t), Some(i)) = (&self.text, self.mon_index(hwnd)) else { return };
-        let (cx, cy) = self.caret_point(t);
+        let (cx, cy) = self.to_screen(self.caret_point(t));
         let m = &self.mons[i];
         unsafe {
             let himc = ImmGetContext(hwnd);
@@ -1081,14 +1265,176 @@ impl Session {
 
     // ───────────────────────── output ─────────────────────────
 
-    fn render_image(&self) -> Option<Image> {
+    fn render_image(&mut self) -> Option<Image> {
+        if let Some(v) = self.view.as_mut() {
+            let img = v.img.take()?;
+            return render_tall(&self.gfx, img, &self.anns).ok();
+        }
         let sel = self.sel?;
-        render_output(&self.gfx, self.cap.ptr(), &self.vrect, &sel, &self.anns).ok()
+        render_output(&self.gfx, self.cap.as_ref()?.ptr(), &self.vrect, &sel, &self.anns).ok()
+    }
+
+    // ───────────────────────── scrolling-capture viewer ─────────────────────────
+
+    /// Screen pixel -> annotation coordinates (`bias` 0.5 centres on the pixel).
+    fn ann_pt(&self, p: Pt, bias: f32) -> Pf {
+        match &self.view {
+            Some(v) => ((p.x - v.ox) as f32 / v.z, v.scroll + (p.y - v.vp.t) as f32 / v.z),
+            None => (p.x as f32 + bias, p.y as f32 + bias),
+        }
+    }
+
+    /// Annotation coordinates -> screen pixels.
+    fn to_screen(&self, a: Pf) -> Pf {
+        match &self.view {
+            Some(v) => (v.ox as f32 + a.0 * v.z, v.vp.t as f32 + (a.1 - v.scroll) * v.z),
+            None => a,
+        }
+    }
+
+    fn scroll_by(&mut self, d: f32) {
+        if let Some(v) = self.view.as_mut() {
+            v.scroll += d;
+        }
+    }
+
+    /// Keeps the view in range, refreshes the visible image area and puts the toolbar in its band.
+    fn layout_view(&mut self) {
+        let Some(v) = self.view.as_mut() else { return };
+        v.scroll = v.scroll.clamp(0.0, v.max_scroll());
+        let disp = v.display();
+        self.sel = Some(disp);
+        let m = &self.mons[0];
+        let s = m.scale;
+        let (tw, th) = toolbar_size(s, true);
+        let pad = (10.0 * s).round() as i32;
+        let x = m.rect.l + (m.rect.w() - tw) / 2;
+        let y = m.rect.t + pad;
+        let mr = m.rect;
+        self.tb = Some(build_toolbar(rect(x, y, x + tw, y + th), 0, s, true));
+        self.popover = if self.popover_open { self.tb.as_ref().map(|tb| build_popover(tb, mr)) } else { None };
+    }
+
+    /// Creates the GPU tiles that the current scroll position needs.
+    fn ensure_tiles(&mut self) {
+        let Some(rt) = self.mons[0].rt.clone() else { return };
+        let Some(v) = self.view.as_mut() else { return };
+        let Some(img) = v.img.as_ref() else { return };
+        let top = v.scroll.floor() as i32;
+        let bottom = (v.scroll + v.vp.h() as f32 / v.z).ceil() as i32;
+        let first = (top / TILE).max(0) as usize;
+        let last = ((bottom / TILE).max(0) as usize).min(v.tiles.len().saturating_sub(1));
+        let base: ID2D1RenderTarget = rt.into();
+        for k in first..=last {
+            if v.tiles[k].is_some() {
+                continue;
+            }
+            let y0 = k as i32 * TILE;
+            let rows = (v.ih - y0).min(TILE);
+            let stride = v.iw as usize * 4;
+            let ptr = unsafe { img.bgra.as_ptr().add(y0 as usize * stride) };
+            let bmp = unsafe { base.CreateBitmap(D2D_SIZE_U { width: v.iw as u32, height: rows as u32 }, Some(ptr as *const _), stride as u32, &bitmap_props()) };
+            match bmp {
+                Ok(b) => v.tiles[k] = Some(b),
+                Err(e) => crate::sys::log(&format!("tile {k} failed: {e}")),
+            }
+        }
+    }
+
+    fn paint_view(&mut self, i: usize) {
+        self.ensure_tiles();
+        let gfx = self.gfx.clone();
+        let m = &self.mons[i];
+        let (Some(hrt), Some(pen), Some(v)) = (&m.rt, &m.pen, &self.view) else { return };
+        let rt: &ID2D1RenderTarget = hrt;
+        let mr = m.rect;
+        let scale = m.scale;
+        let sel = self.sel.unwrap_or(v.vp);
+        unsafe {
+            rt.BeginDraw();
+            rt.SetTransform(&windows_numerics_translate(-(mr.l as f32), -(mr.t as f32)));
+            rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            rt.Clear(Some(&colorf(0x14161f, 1.0)));
+            let b = &pen.brush;
+            // the image, tile by tile
+            rt.PushAxisAlignedClip(&rect_f(&v.vp), D2D1_ANTIALIAS_MODE_ALIASED);
+            let tx = (v.ox - mr.l) as f32;
+            let ty = (v.vp.t - mr.t) as f32 - v.scroll * v.z;
+            let image_space = windows_numerics::Matrix3x2 { M11: v.z, M12: 0.0, M21: 0.0, M22: v.z, M31: tx, M32: ty };
+            rt.SetTransform(&image_space);
+            let mode = if (v.z - 1.0).abs() < 1e-3 { D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR } else { D2D1_BITMAP_INTERPOLATION_MODE_LINEAR };
+            for (k, t) in v.tiles.iter().enumerate() {
+                let Some(t) = t else { continue };
+                let y0 = (k as i32 * TILE) as f32;
+                let rows = (v.ih - k as i32 * TILE).min(TILE) as f32;
+                rt.DrawBitmap(t, Some(&rf(0.0, y0, v.iw as f32, y0 + rows)), 1.0, mode, None);
+            }
+            // annotations, clipped to the visible image
+            rt.SetTransform(&windows_numerics_translate(-(mr.l as f32), -(mr.t as f32)));
+            rt.PushAxisAlignedClip(&rect_f(&sel), D2D1_ANTIALIAS_MODE_ALIASED);
+            rt.SetTransform(&image_space);
+            for a in &self.anns {
+                draw_ann(&gfx, rt, pen, a);
+            }
+            if let Some(a) = &self.cur {
+                draw_ann(&gfx, rt, pen, a);
+            }
+            if let Some(t) = &self.text {
+                self.draw_text_edit(rt, pen, t);
+            }
+            rt.SetTransform(&windows_numerics_translate(-(mr.l as f32), -(mr.t as f32)));
+            rt.PopAxisAlignedClip();
+            rt.PopAxisAlignedClip();
+            // frame and scroll thumb
+            b.SetColor(&colorf(ACCENT, 1.0));
+            rt.DrawRectangle(&rf(sel.l as f32 - 0.5, sel.t as f32 - 0.5, sel.r as f32 + 0.5, sel.b as f32 + 0.5), b, 1.0, None);
+            let total = v.ih as f32 * v.z;
+            if total > v.vp.h() as f32 {
+                let track = v.vp.h() as f32 - 8.0 * scale;
+                let th = (track * v.vp.h() as f32 / total).max(24.0 * scale);
+                let top = v.vp.t as f32 + 4.0 * scale + (track - th) * (v.scroll / v.max_scroll().max(1.0));
+                let x = v.vp.r as f32 - 8.0 * scale;
+                b.SetColor(&colorf(0xffffff, 0.45));
+                let rr = D2D1_ROUNDED_RECT { rect: rf(x, top, x + 4.0 * scale, top + th), radiusX: 2.0 * scale, radiusY: 2.0 * scale };
+                rt.FillRoundedRectangle(&rr, b);
+            }
+            // size label at the left of the toolbar band
+            let text = if (v.z - 1.0).abs() < 1e-3 { format!("{} \u{00d7} {}", v.iw, v.ih) } else { format!("{} \u{00d7} {}  ({:.0}%)", v.iw, v.ih, v.z * 100.0) };
+            let fs = 12.5 * scale;
+            let fmt = gfx.font(fs, true);
+            let (_, th) = gfx.measure(&text, fs, true);
+            b.SetColor(&colorf(0xaab0cf, 1.0));
+            let wide: Vec<u16> = text.encode_utf16().collect();
+            let ly = mr.t as f32 + ((v.vp.t - mr.t) as f32 - th) / 2.0;
+            rt.DrawText(&wide, &fmt, &rf(mr.l as f32 + 18.0 * scale, ly, mr.l as f32 + 400.0 * scale, ly + th + 4.0), b, D2D1_DRAW_TEXT_OPTIONS_NONE, windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL);
+            if let Some(tb) = &self.tb {
+                self.draw_toolbar(&gfx, rt, pen, tb);
+                if let Some(p) = &self.popover {
+                    self.draw_popover(&gfx, rt, pen, p, tb.scale);
+                } else if let Some(h) = self.hover {
+                    self.draw_tooltip(&gfx, rt, pen, tb, h);
+                }
+            }
+            rt.SetTransform(&windows_numerics_translate(0.0, 0.0));
+            if let Err(e) = rt.EndDraw(None, None) {
+                crate::sys::log(&format!("EndDraw (view) failed: {e}"));
+                if e.code().0 as u32 == 0x8899000C {
+                    let m = &mut self.mons[i];
+                    m.rt = None;
+                    m.pen = None;
+                    let _ = InvalidateRect(Some(m.hwnd), None, false);
+                }
+            }
+        }
     }
 
     // ───────────────────────── painting ─────────────────────────
 
     fn paint(&mut self, i: usize) {
+        if self.view.is_some() {
+            self.paint_view(i);
+            return;
+        }
         let gfx = self.gfx.clone();
         let m = &self.mons[i];
         let (Some(hrt), Some(bmp), Some(pen)) = (&m.rt, &m.bmp, &m.pen) else {
@@ -1177,7 +1523,8 @@ impl Session {
     }
 
     unsafe fn draw_label(&self, gfx: &Gfx, rt: &ID2D1RenderTarget, pen: &Pen, sel: &Rect, scale: f32) {
-        let text = format!("{} \u{00d7} {}", sel.w(), sel.h());
+        let size = format!("{} \u{00d7} {}", sel.w(), sel.h());
+        let text = if self.scroll_mode { format!("{}  \u{00b7}  {}", strings::tr(self.lang).t_scroll, size) } else { size };
         let fs = 12.5 * scale;
         let (tw, th) = gfx.measure(&text, fs, true);
         let (pw, ph) = (7.0 * scale, 4.0 * scale);
@@ -1292,6 +1639,11 @@ impl Session {
                 b.SetColor(&colorf(0xffffff, 1.0));
                 rt.DrawEllipse(&D2D1_ELLIPSE { point: c, radiusX: 8.0 * k, radiusY: 8.0 * k }, b, lw, None);
             }
+            Btn::Scroll => {
+                line((7.0, 4.0), (17.0, 4.0), lw);
+                line((12.0, 4.5), (12.0, 18.5), lw);
+                wings((12.0, 20.0), (12.0, 13.0), 5.2);
+            }
             Btn::Undo => {
                 let mut prev = None;
                 let mut first = None;
@@ -1342,6 +1694,7 @@ impl Session {
             Btn::Tool(Tool::Fill) => t.t_fill,
             Btn::Tool(Tool::Text) => t.t_text,
             Btn::Color => t.t_color,
+            Btn::Scroll => t.t_scroll,
             Btn::Undo => t.t_undo,
             Btn::Copy => t.t_copy,
             Btn::Save => t.t_save,
@@ -1450,20 +1803,24 @@ fn resize_cursor(h: Handle) -> PCWSTR {
 
 // ───────────────────────── toolbar geometry ─────────────────────────
 
-const ITEMS: [Option<Btn>; 12] = [
-    Some(Btn::Tool(Tool::Move)),
-    Some(Btn::Tool(Tool::Pen)),
-    Some(Btn::Tool(Tool::Arrow)),
-    Some(Btn::Tool(Tool::Rect)),
-    Some(Btn::Tool(Tool::Fill)),
-    Some(Btn::Tool(Tool::Text)),
-    Some(Btn::Color),
-    None,
-    Some(Btn::Undo),
-    Some(Btn::Copy),
-    Some(Btn::Save),
-    Some(Btn::Close),
-];
+/// Toolbar layout; `None` is the separator. The scrolling-capture button is left out in the viewer.
+fn items(viewer: bool) -> Vec<Option<Btn>> {
+    let mut v = vec![
+        Some(Btn::Tool(Tool::Move)),
+        Some(Btn::Tool(Tool::Pen)),
+        Some(Btn::Tool(Tool::Arrow)),
+        Some(Btn::Tool(Tool::Rect)),
+        Some(Btn::Tool(Tool::Fill)),
+        Some(Btn::Tool(Tool::Text)),
+        Some(Btn::Color),
+        None,
+    ];
+    if !viewer {
+        v.push(Some(Btn::Scroll));
+    }
+    v.extend([Some(Btn::Undo), Some(Btn::Copy), Some(Btn::Save), Some(Btn::Close)]);
+    v
+}
 
 struct Metrics {
     pad: i32,
@@ -1477,21 +1834,21 @@ fn metrics(s: f32) -> Metrics {
     Metrics { pad: f(7.0), btn: f(34.0), gap: f(3.0), sep: f(12.0) }
 }
 
-pub fn toolbar_size(s: f32) -> (i32, i32) {
+pub fn toolbar_size(s: f32, viewer: bool) -> (i32, i32) {
     let m = metrics(s);
     let mut x = m.pad;
-    for it in ITEMS {
+    for it in items(viewer) {
         x += if it.is_some() { m.btn + m.gap } else { m.sep };
     }
     (x - m.gap + m.pad, m.btn + 2 * m.pad)
 }
 
-fn build_toolbar(r: Rect, mon: usize, s: f32) -> Toolbar {
+fn build_toolbar(r: Rect, mon: usize, s: f32, viewer: bool) -> Toolbar {
     let m = metrics(s);
     let mut x = r.l + m.pad;
     let mut buttons = Vec::new();
     let mut sep_x = 0;
-    for it in ITEMS {
+    for it in items(viewer) {
         match it {
             Some(b) => {
                 buttons.push((b, rect(x, r.t + m.pad, x + m.btn, r.t + m.pad + m.btn)));
@@ -1564,18 +1921,19 @@ mod tests {
 
     #[test]
     fn toolbar_size_scales_with_dpi() {
-        let (w1, h1) = toolbar_size(1.0);
-        let (w2, h2) = toolbar_size(2.0);
-        assert!(w1 > 300 && w1 < 520, "{w1}");
+        let (w1, h1) = toolbar_size(1.0, false);
+        let (w2, h2) = toolbar_size(2.0, false);
+        assert!(w1 > 300 && w1 < 560, "{w1}");
         assert_eq!(h1, 34 + 14);
         assert!((w2 - 2 * w1).abs() <= 6 && (h2 - 2 * h1).abs() <= 2);
     }
 
     #[test]
     fn toolbar_buttons_fit_inside() {
-        let (w, h) = toolbar_size(1.25);
-        let tb = build_toolbar(rect(100, 100, 100 + w, 100 + h), 0, 1.25);
-        assert_eq!(tb.buttons.len(), 11);
+        let (w, h) = toolbar_size(1.25, false);
+        let tb = build_toolbar(rect(100, 100, 100 + w, 100 + h), 0, 1.25, false);
+        assert_eq!(tb.buttons.len(), 12);
+        assert_eq!(build_toolbar(rect(0, 0, 900, 90), 0, 1.0, true).buttons.len(), 11);
         for (_, r) in &tb.buttons {
             assert!(tb.rect.contains_rect(r));
         }
@@ -1588,8 +1946,8 @@ mod tests {
     #[test]
     fn popover_stays_inside_the_monitor() {
         let mon = rect(0, 0, 1920, 1080);
-        let (w, h) = toolbar_size(1.0);
-        let tb = build_toolbar(rect(1500, 1000, 1500 + w, 1000 + h), 0, 1.0);
+        let (w, h) = toolbar_size(1.0, false);
+        let tb = build_toolbar(rect(1500, 1000, 1500 + w, 1000 + h), 0, 1.0, false);
         let p = build_popover(&tb, mon);
         assert!(mon.contains_rect(&p.rect), "{:?}", p.rect);
         assert_eq!(p.swatches.len(), 10);

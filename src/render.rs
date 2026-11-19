@@ -270,3 +270,61 @@ pub fn render_output(gfx: &Gfx, pixels: *const u8, vrect: &Rect, sel: &Rect, ann
 pub fn windows_numerics_translate(x: f32, y: f32) -> windows_numerics::Matrix3x2 {
     windows_numerics::Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: x, M32: y }
 }
+
+/// Draws the annotations onto a tall stitched image, one 2048-row strip at a time so no Direct2D
+/// bitmap or render-target size limit applies. Works in place on the pixel buffer.
+pub fn render_tall(gfx: &Gfx, mut img: Image, anns: &[Ann]) -> std::result::Result<Image, String> {
+    if anns.is_empty() {
+        return Ok(img);
+    }
+    const STRIP: u32 = 2048;
+    let w = img.w;
+    let stride = w as usize * 4;
+    let mut y0 = 0u32;
+    while y0 < img.h {
+        let rows = STRIP.min(img.h - y0);
+        unsafe {
+            let bmp = gfx.wic.CreateBitmap(w, rows, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad).map_err(|e| e.to_string())?;
+            let props = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                usage: D2D1_RENDER_TARGET_USAGE_NONE,
+                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+            };
+            let rt = gfx.d2d.CreateWicBitmapRenderTarget(&bmp, &props).map_err(|e| e.to_string())?;
+            let rt: ID2D1RenderTarget = rt.into();
+            let pen = Pen::new(gfx, &rt).map_err(|e| e.to_string())?;
+            let src = rt
+                .CreateBitmap(D2D_SIZE_U { width: w, height: rows }, Some(img.bgra.as_ptr().add(y0 as usize * stride) as *const _), stride as u32, &bitmap_props())
+                .map_err(|e| e.to_string())?;
+            rt.BeginDraw();
+            rt.DrawBitmap(&src, Some(&rf(0.0, 0.0, w as f32, rows as f32)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, None);
+            rt.SetTransform(&windows_numerics_translate(0.0, -(y0 as f32)));
+            for a in anns {
+                draw_ann(gfx, &rt, &pen, a);
+            }
+            rt.SetTransform(&windows_numerics_translate(0.0, 0.0));
+            rt.EndDraw(None, None).map_err(|e| e.to_string())?;
+            drop(src);
+
+            let region = WICRect { X: 0, Y: 0, Width: w as i32, Height: rows as i32 };
+            let lock = bmp.Lock(&region, WICBitmapLockRead.0 as u32).map_err(|e| e.to_string())?;
+            let mut size = 0u32;
+            let mut ptr: *mut u8 = std::ptr::null_mut();
+            lock.GetDataPointer(&mut size, &mut ptr).map_err(|e| e.to_string())?;
+            let lstride = lock.GetStride().map_err(|e| e.to_string())? as usize;
+            for y in 0..rows as usize {
+                let from = std::slice::from_raw_parts(ptr.add(y * lstride), stride);
+                let at = (y0 as usize + y) * stride;
+                img.bgra[at..at + stride].copy_from_slice(from);
+            }
+        }
+        y0 += rows;
+    }
+    for px in img.bgra.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+    Ok(img)
+}
