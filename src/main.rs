@@ -28,6 +28,8 @@ mod i18n;
 #[allow(dead_code)]
 mod nimvoro;
 #[cfg(windows)]
+mod ocr;
+#[cfg(windows)]
 mod overlay;
 #[cfg(unix)]
 #[path = "overlay_linux.rs"]
@@ -49,6 +51,12 @@ mod manual;
 #[cfg(windows)]
 mod stitch;
 mod strings;
+#[cfg(windows)]
+mod textcopy;
+#[cfg(windows)]
+mod textlayout;
+#[cfg(windows)]
+mod uia;
 mod support;
 #[cfg(windows)]
 mod sys;

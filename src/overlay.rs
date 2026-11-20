@@ -29,6 +29,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     Copy,
+    /// Copy the text inside the selection (`Done::image` holds its raw pixels, `Done::rect` its place).
+    CopyText,
     Save,
     Cancel,
     /// Start a scrolling capture of the selected area (`Done::rect`).
@@ -72,6 +74,7 @@ enum Btn {
     Start,
     Undo,
     Copy,
+    CopyText,
     Save,
     Close,
 }
@@ -479,13 +482,15 @@ fn finish(action: Action) {
         let _ = ReleaseCapture();
     }
     s.hide();
-    let image = if matches!(action, Action::Copy | Action::Save) {
-        s.commit_text();
-        s.render_image()
-    } else {
-        None
+    let image = match action {
+        Action::Copy | Action::Save => {
+            s.commit_text();
+            s.render_image()
+        }
+        Action::CopyText => s.raw_region(),
+        _ => None,
     };
-    let rect = if action == Action::Scroll { s.sel } else { None };
+    let rect = if matches!(action, Action::Scroll | Action::CopyText) { s.sel } else { None };
     let (color, stroke) = (s.color, s.stroke);
     drop(s);
     crate::resident::capture_done(Done { action, image, color, stroke, rect });
@@ -1041,6 +1046,7 @@ impl Session {
             Btn::Scroll | Btn::Start => *action = Some(Action::Scroll),
             Btn::Undo => self.mutate(|s| s.undo()),
             Btn::Copy => *action = Some(Action::Copy),
+            Btn::CopyText => *action = Some(Action::CopyText),
             Btn::Save => *action = Some(Action::Save),
             Btn::Close => *action = Some(Action::Cancel),
         }
@@ -1124,7 +1130,9 @@ impl Session {
             }
             _ if ctrl => match vk.0 {
                 0x43 => {
-                    if self.sel.is_some() {
+                    if self.sel.is_some() && self.view.is_none() {
+                        *action = Some(if shift { Action::CopyText } else { Action::Copy });
+                    } else if self.sel.is_some() {
                         *action = Some(Action::Copy);
                     }
                 }
@@ -1270,6 +1278,21 @@ impl Session {
     }
 
     // ───────────────────────── output ─────────────────────────
+
+    /// The selected pixels exactly as they were on screen: no dimming, no annotations (for the text reader).
+    fn raw_region(&self) -> Option<Image> {
+        let sel = self.sel?.intersect(&self.vrect)?;
+        let cap = self.cap.as_ref()?;
+        let stride = cap.stride();
+        let (w, h) = (sel.w() as usize, sel.h() as usize);
+        let mut bgra = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            let off = (sel.t - self.vrect.t) as usize * stride + y * stride + (sel.l - self.vrect.l) as usize * 4;
+            // SAFETY: the selection lies inside the captured virtual desktop (intersected above)
+            bgra.extend_from_slice(unsafe { std::slice::from_raw_parts(cap.ptr().add(off), w * 4) });
+        }
+        Some(Image { w: w as u32, h: h as u32, bgra })
+    }
 
     fn render_image(&mut self) -> Option<Image> {
         if let Some(v) = self.view.as_mut() {
@@ -1689,6 +1712,15 @@ impl Session {
                 b.SetColor(&colorf(col, 1.0));
                 rt.DrawRoundedRectangle(&rr(4.5, 8.5, 15.5, 19.5), b, lw, None);
             }
+            Btn::CopyText => {
+                // crop corners around two lines of text
+                for (cx, cy, dx, dy) in [(4.0f32, 4.0f32, 1.0f32, 1.0f32), (20.0, 4.0, -1.0, 1.0), (4.0, 20.0, 1.0, -1.0), (20.0, 20.0, -1.0, -1.0)] {
+                    line((cx, cy), (cx + 4.5 * dx, cy), lw);
+                    line((cx, cy), (cx, cy + 4.5 * dy), lw);
+                }
+                line((8.5, 10.0), (15.5, 10.0), lw);
+                line((8.5, 14.0), (13.0, 14.0), lw);
+            }
             Btn::Save => {
                 line((12.0, 4.0), (12.0, 14.5), lw);
                 wings((12.0, 15.0), (12.0, 9.0), 4.6);
@@ -1717,6 +1749,7 @@ impl Session {
             Btn::Start => t.scroll_start,
             Btn::Undo => t.t_undo,
             Btn::Copy => t.t_copy,
+            Btn::CopyText => t.t_copy_text,
             Btn::Save => t.t_save,
             Btn::Close => t.t_close,
         };
@@ -1865,7 +1898,11 @@ fn items(kit: Kit) -> Vec<Option<Btn>> {
     if !viewer {
         v.push(Some(Btn::Scroll));
     }
-    v.extend([Some(Btn::Undo), Some(Btn::Copy), Some(Btn::Save), Some(Btn::Close)]);
+    v.extend([Some(Btn::Undo), Some(Btn::Copy)]);
+    if !viewer {
+        v.push(Some(Btn::CopyText));
+    }
+    v.extend([Some(Btn::Save), Some(Btn::Close)]);
     v
 }
 
@@ -1979,7 +2016,7 @@ mod tests {
     fn toolbar_buttons_fit_inside() {
         let (w, h) = toolbar_size(1.25, Kit::Full);
         let tb = build_toolbar(rect(100, 100, 100 + w, 100 + h), 0, 1.25, Kit::Full);
-        assert_eq!(tb.buttons.len(), 12);
+        assert_eq!(tb.buttons.len(), 13);
         assert_eq!(build_toolbar(rect(0, 0, 900, 90), 0, 1.0, Kit::Viewer).buttons.len(), 11);
         assert_eq!(build_toolbar(rect(0, 0, 900, 90), 0, 1.0, Kit::Start).buttons.len(), 2);
         for (_, r) in &tb.buttons {
@@ -2002,5 +2039,117 @@ mod tests {
         for s in &p.swatches {
             assert!(p.rect.contains_rect(s));
         }
+    }
+
+    fn pump(ms: u64) {
+        let end = Instant::now() + std::time::Duration::from_millis(ms);
+        while Instant::now() < end {
+            unsafe {
+                let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn post(hwnd: HWND, msg: u32, mon: Rect, p: Pt) {
+        let (x, y) = (p.x - mon.l, p.y - mon.t);
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(((y as isize) << 16) | (x as isize & 0xffff)));
+        }
+    }
+
+    /// Screenshot of the toolbar over a demo page: `SNAPPER_SHOT_RECT=l,t,r,b` (screen pixels) is the
+    /// selection, `SNAPPER_SHOT_OUT` the PNG, `SNAPPER_SHOT_LANG` en, ru or uk. The messages go to the
+    /// overlay's own window, and only after it is the foreground window.
+    #[test]
+    #[ignore]
+    fn toolbar_shot() {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+        let Ok(r) = std::env::var("SNAPPER_SHOT_RECT") else { return };
+        let out = std::env::var("SNAPPER_SHOT_OUT").unwrap();
+        let lang = Lang::ALL.into_iter().find(|l| l.code() == std::env::var("SNAPPER_SHOT_LANG").unwrap_or("en".into())).unwrap_or(Lang::En);
+        let v: Vec<i32> = r.split(',').map(|x| x.trim().parse().unwrap()).collect();
+        let sel = rect(v[0], v[1], v[2], v[3]);
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        assert!(start(Params { lang, color: 0xff3b30, stroke: 1, scroll: false }));
+        pump(900);
+        let (hwnd, mon) = SESSION.with(|c| {
+            let b = c.borrow();
+            let s = b.as_ref().unwrap();
+            let m = s.mons.iter().find(|m| m.rect.contains(pt(sel.l, sel.t))).unwrap();
+            (m.hwnd, m.rect)
+        });
+        let mut fg = false;
+        for _ in 0..20 {
+            if unsafe { GetForegroundWindow() } == hwnd {
+                fg = true;
+                break;
+            }
+            pump(100);
+        }
+        if !fg {
+            cancel();
+            panic!("the overlay window is not in the foreground: no input is sent");
+        }
+        post(hwnd, WM_LBUTTONDOWN, mon, pt(sel.l, sel.t));
+        pump(80);
+        post(hwnd, WM_MOUSEMOVE, mon, pt((sel.l + sel.r) / 2, (sel.t + sel.b) / 2));
+        pump(80);
+        post(hwnd, WM_MOUSEMOVE, mon, pt(sel.r, sel.b));
+        pump(80);
+        post(hwnd, WM_LBUTTONUP, mon, pt(sel.r, sel.b));
+        pump(400);
+        let (tbr, copy_text) = SESSION.with(|c| {
+            let b = c.borrow();
+            let tb = b.as_ref().unwrap().tb.as_ref().unwrap();
+            (tb.rect, tb.buttons.iter().find(|(b, _)| *b == Btn::CopyText).map(|(_, r)| *r).unwrap())
+        });
+        post(hwnd, WM_MOUSEMOVE, mon, copy_text.center());
+        pump(500);
+        let vr = capture::virtual_rect(&capture::monitors());
+        let cap = capture::capture(vr).expect("capture");
+        let area = sel.union(&tbr).inflate(90).intersect(&mon).unwrap();
+        let (w, h) = (area.w() as usize, area.h() as usize);
+        let mut bgra = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            let off = (area.t - vr.t) as usize * cap.stride() + y * cap.stride() + (area.l - vr.l) as usize * 4;
+            bgra.extend_from_slice(unsafe { std::slice::from_raw_parts(cap.ptr().add(off), w * 4) });
+        }
+        let img = Image { w: w as u32, h: h as u32, bgra };
+        std::fs::write(&out, crate::files::encode_png(&img, false).unwrap()).unwrap();
+        drop(cap);
+        cancel();
+    }
+
+    /// Prints where the toolbar buttons land for a selection (`SNAPPER_SHOT_RECT`), for the
+    /// end-to-end script that clicks them in a separate Snapper process.
+    #[test]
+    #[ignore]
+    fn toolbar_geometry() {
+        use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+        let Ok(r) = std::env::var("SNAPPER_SHOT_RECT") else { return };
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+        let v: Vec<i32> = r.split(',').map(|x| x.trim().parse().unwrap()).collect();
+        let sel = rect(v[0], v[1], v[2], v[3]);
+        let mons = capture::monitors();
+        let places: Vec<Place> = mons.iter().map(|m| Place { rect: m.rect, toolbar: toolbar_size(m.scale(), Kit::Full) }).collect();
+        let mon = mons.iter().find(|m| m.rect.contains(pt(sel.r - 1, sel.b - 1))).unwrap();
+        let gap = (12.0 * mon.scale()) as i32;
+        let (r, i) = place_toolbar(&sel, &places, gap).unwrap();
+        let tb = build_toolbar(r, i, mons[i].scale(), Kit::Full);
+        for (b, br) in &tb.buttons {
+            println!("BTN {:?} {} {}", b, br.center().x, br.center().y);
+        }
+        println!("MON {} {} {} {}", mons[i].rect.l, mons[i].rect.t, mons[i].rect.r, mons[i].rect.b);
     }
 }

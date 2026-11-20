@@ -32,6 +32,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_UPDATE_DONE: u32 = WM_APP + 2;
 const WM_SCROLL_DONE: u32 = WM_APP + 3;
+const WM_TEXT_DONE: u32 = WM_APP + 4;
+const WM_TEXT_BUSY: u32 = WM_APP + 5;
 const HOTKEY_ID: i32 = 1;
 const HOTKEY_SCROLL_ID: i32 = 2;
 /// Temporary hotkeys while a scrolling capture runs (the user is browsing, so Esc is not ours).
@@ -208,6 +210,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             scroll_done();
             return LRESULT(0);
         }
+        WM_TEXT_DONE => {
+            if let Some(text) = TEXT_NOTICE.lock().ok().and_then(|mut n| n.take()) {
+                with(|s| balloon(s, "Snapper", &text, BalloonKind::None));
+            }
+            return LRESULT(0);
+        }
+        WM_TEXT_BUSY => {
+            with(|s| balloon(s, "Snapper", strings::tr(s.lang).text_busy, BalloonKind::None));
+            return LRESULT(0);
+        }
         WM_TIMER if wp.0 == TIMER_SCROLL => {
             let _ = KillTimer(Some(hwnd), TIMER_SCROLL);
             start_capture(true);
@@ -370,9 +382,22 @@ pub fn capture_done(d: Done) {
         }
         return;
     }
+    if d.action == Action::CopyText {
+        if let (Some(img), Some(r)) = (d.image, d.rect) {
+            start_text_copy(img, r);
+        }
+        overlay::release_graphics();
+        trim_memory();
+        if let Some(h) = with(|s| s.hwnd) {
+            unsafe {
+                let _ = SetTimer(Some(h), TIMER_PREWARM, 1500, None);
+            }
+        }
+        return;
+    }
     if let Some(img) = &d.image {
         match d.action {
-            Action::Scroll => {}
+            Action::Scroll | Action::CopyText => {}
             Action::Copy => {
                 if crate::clipboard::copy_image(img).is_err() {
                     with(|s| balloon(s, "Snapper", strings::tr(s.lang).copy_failed, BalloonKind::None));
@@ -390,6 +415,42 @@ pub fn capture_done(d: Done) {
             let _ = SetTimer(Some(h), TIMER_PREWARM, 1500, None);
         }
     }
+}
+
+/// The notice of the last finished text copy, taken by the message window.
+static TEXT_NOTICE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Reads the text of the region (raw pixels `img` at `area`) off the UI thread, puts it on the
+/// clipboard and shows a short notice. A slow read first shows "Reading text".
+fn start_text_copy(img: files::Image, area: Rect) {
+    let Some((hwnd, lang)) = with(|s| (s.hwnd, s.lang)) else { return };
+    let hwnd_raw = hwnd.0 as isize;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = done.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        if !flag.load(std::sync::atomic::Ordering::SeqCst) {
+            unsafe {
+                let _ = PostMessageW(Some(HWND(hwnd_raw as *mut _)), WM_TEXT_BUSY, WPARAM(0), LPARAM(0));
+            }
+        }
+    });
+    std::thread::spawn(move || {
+        let out = crate::textcopy::extract(&img, area, lang.code());
+        let mut notice = crate::textcopy::notice(lang, &out);
+        if let Some(text) = &out.text {
+            if crate::clipboard::copy_text(text).is_err() {
+                notice = strings::tr(lang).copy_failed.to_string();
+            }
+        }
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut n) = TEXT_NOTICE.lock() {
+            *n = Some(notice);
+        }
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd_raw as *mut _)), WM_TEXT_DONE, WPARAM(0), LPARAM(0));
+        }
+    });
 }
 
 fn save_image(img: &files::Image) {

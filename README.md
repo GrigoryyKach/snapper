@@ -67,6 +67,7 @@ cargo build --release
 | Colour | 10 presets plus a HEX field; three stroke widths (also set the text size). The choice is remembered and applies to every tool |
 | Undo | Multi-level (`Ctrl+Z`, redo with `Ctrl+Y`) |
 | Scrolling capture (Windows) | Start a scrolling capture of the selected area |
+| Copy text (Windows) | Copy all the text inside the selection (`Ctrl+Shift+C`), see below |
 | Copy / Save / Close | `Ctrl+C` / `Ctrl+S` / `Esc` |
 
 ### Keys
@@ -75,6 +76,7 @@ cargo build --release
 |---|---|
 | `Ctrl+C` or `Enter` | Copy the selection (with annotations) and close |
 | `Ctrl+S` | Save to the screenshots folder and close |
+| `Ctrl+Shift+C` | Copy the text inside the selection and close (Windows) |
 | `Esc` | Close without anything (while editing text, only cancels the text) |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
 | Right-click before a selection exists | Close |
@@ -131,6 +133,58 @@ past the top of what was captured does not add rows above it; floating elements 
 bubble) are copied wherever they happen to be in a frame; video and animation inside the area are stitched as they look when stable; pages that
 differ only slightly, or look alike, can be confused when the content is very repetitive; the page's own scrollbar column is not stitched specially.
 Scrolling capture is **not available on Linux** (X11 or Wayland) in this version: the button, tray item, hotkey and settings row are absent there.
+
+## Copy text (Windows only)
+
+The **Copy text** button (`Ctrl+Shift+C`) puts every piece of text inside the selection on the clipboard as plain text (`CF_UNICODETEXT`)
+and closes the overlay. A notice says how many lines were copied and how ("exact text" or "OCR"); with nothing found it says so and leaves
+the clipboard alone. The work runs off the UI thread (a typical region takes about 0.1 to 0.3 s); a read that takes longer than a second shows
+"Reading text...". The button, the key and this feature are absent on Linux.
+
+Two sources read the same region at the same time (`src/textcopy.rs`):
+
+1. **Exact text through UI Automation** (`src/uia.rs`): no recognition errors. Sample points inside the region find the elements under it.
+   An element that offers a text pattern (browser pages, editors, documents) is read line by line from its visible ranges: lines inside the region
+   whole, lines cut by the region word by word, lines that share a visual row (table cells) joined with tabs. Other elements (labels,
+   buttons, list items, fields) give their name or value, laid out by their boxes. Password fields are never read. Chromium and Edge build their accessibility tree
+   on the first request, so the very first read after a browser starts can take about half a second more.
+2. **OCR with `Windows.Media.Ocr`** (`src/ocr.rs`, offline, no extra size) on the undimmed pixels, at native resolution:
+   - the pixels become dark text on white whatever the background (inverted for light-on-dark, normalised against the surroundings for mixed
+     areas) and the contrast is stretched;
+   - upscaled 1 to 3 times with Lanczos so a text line is about 32 px tall, padded, and tiled at quiet rows when the engine's size limit is reached;
+   - every engine for the user's profile languages and English, Russian and Ukrainian reads it (in parallel); the best is picked by script
+     (whole Cyrillic words and a garbled Latin result mean Cyrillic; `ы э ъ ё` or `і ї є ґ` tell Russian from Ukrainian);
+   - line bands the engine skipped (`a, b = 0, 1`) are cut out and read on their own;
+   - look-alike letters are repaired inside a Latin line (`сап` to `can`, `0CR` to `OCR`);
+   - the words are put back in reading order from their boxes: lines, paragraph breaks, indentation (in characters for monospace text),
+     tab separated tables, prose columns read one after the other.
+
+**Which text is used.** The exact text wins when it explains the OCR text: at least 80 percent of the OCR words with four letters or more are in it or
+are damaged copies of its words (OCR slips letters, so a wrong word still counts). If OCR sees real words that the exact text lacks (an image of text next
+to real text, a canvas), the exact text is only part of what is on screen and the OCR text is used, so half of the text is never returned silently. The exact text also
+loses when it holds many words OCR finds hardly any of. With no exact text, the OCR text is used; with no OCR language, the exact text alone.
+
+**OCR languages.** Windows installs OCR per language. If a language of your profile has none, and nothing is found, the notice says which one; add it in
+Settings > Time & language > Language, with the "Optical character recognition" feature. Snapper installs nothing itself. Without the Ukrainian pack,
+Ukrainian text read by OCR loses `і ї є ґ` (the Russian engine reads it); the exact text path is not affected.
+
+**Accuracy** on a local test page rendered in Edge (character accuracy against the ground truth, whitespace ignored; 11 to 16 px, light and dark):
+
+| Case | Exact text | OCR alone |
+|---|---|---|
+| English, Russian, mixed English and Russian paragraphs | 100% | 100%, 100%, 96% |
+| Ukrainian (no Ukrainian OCR pack installed) | 100% | 69% to 72% |
+| 11 px English, 12 px Russian | 100% | 100%, 98.6% |
+| Light on dark, 11 and 14 px, English and Russian | 100% | 99.3% to 100% |
+| Code block with indentation | 100% (layout exact) | 75% (the engine drops lines of short tokens) |
+| Table | 100% | 98% |
+| Confusable characters (`l1I\|`, `O0o`, `rn`/`m`) | 100% | 43% (the engine skips symbol lines) |
+| Image of text (English and Russian, 13 and 22 px, light and dark) | none: only OCR can read it | 100% |
+| Heading plus an image of text | 28% (heading only) | 99% (chosen) |
+
+`cargo test --release` runs the unit tests (line, column and indentation rebuilding, the exact-versus-OCR choice, the engine pick, the
+light-on-dark detection). The benchmark itself needs a visible test page and is run by hand:
+`SNAPPER_BENCH_DIR=<dir> cargo test --release bench -- --ignored --nocapture` (see `src/textcopy.rs`).
 
 ## Tray
 

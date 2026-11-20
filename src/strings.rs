@@ -92,6 +92,16 @@ pub struct S {
     pub scroll_limit: &'static str,
     pub scroll_nothing: &'static str,
     pub scroll_failed: &'static str,
+    // copy text from the region (Windows)
+    pub t_copy_text: &'static str,
+    pub text_copied: &'static str,
+    /// Plural forms for "{n} lines": one, few (2-4), many.
+    pub text_lines: [&'static str; 3],
+    pub text_exact: &'static str,
+    pub text_ocr: &'static str,
+    pub text_none: &'static str,
+    pub text_busy: &'static str,
+    pub text_no_ocr: &'static str,
 }
 
 const EN: S = S {
@@ -179,6 +189,14 @@ const EN: S = S {
     scroll_limit: "Stopped at the height limit ({h} px). The result is cut there.",
     scroll_nothing: "Nothing was captured: the area did not change.",
     scroll_failed: "Scrolling capture failed",
+    t_copy_text: "Copy text (Ctrl+Shift+C)",
+    text_copied: "Text copied \u{b7} {n} \u{b7} {m}",
+    text_lines: ["{n} line", "{n} lines", "{n} lines"],
+    text_exact: "exact text",
+    text_ocr: "OCR",
+    text_none: "No text found in the region",
+    text_busy: "Reading text\u{2026}",
+    text_no_ocr: "No OCR language pack for {l}. Settings, Time & language, Language: add the language with the \"Optical character recognition\" feature.",
 };
 
 const RU: S = S {
@@ -266,6 +284,14 @@ const RU: S = S {
     scroll_limit: "Остановлено на пределе высоты ({h} px). Результат обрезан по нему.",
     scroll_nothing: "Ничего не снято: область не менялась.",
     scroll_failed: "Не удалось сделать снимок с прокруткой",
+    t_copy_text: "Копировать текст (Ctrl+Shift+C)",
+    text_copied: "Текст скопирован \u{b7} {n} \u{b7} {m}",
+    text_lines: ["{n} строка", "{n} строки", "{n} строк"],
+    text_exact: "точный текст",
+    text_ocr: "распознавание",
+    text_none: "В области нет текста",
+    text_busy: "Читаю текст\u{2026}",
+    text_no_ocr: "Нет языкового пакета распознавания для {l}. Параметры, Время и язык, Язык: добавьте язык с компонентом \"Оптическое распознавание символов\".",
 };
 
 const UK: S = S {
@@ -353,6 +379,14 @@ const UK: S = S {
     scroll_limit: "Зупинено на межі висоти ({h} px). Результат обрізано по ній.",
     scroll_nothing: "Нічого не знято: область не змінювалась.",
     scroll_failed: "Не вдалося зробити знімок із прокруткою",
+    t_copy_text: "Копіювати текст (Ctrl+Shift+C)",
+    text_copied: "Текст скопійовано \u{b7} {n} \u{b7} {m}",
+    text_lines: ["{n} рядок", "{n} рядки", "{n} рядків"],
+    text_exact: "точний текст",
+    text_ocr: "розпізнавання",
+    text_none: "У ділянці немає тексту",
+    text_busy: "Читаю текст\u{2026}",
+    text_no_ocr: "Немає мовного пакета розпізнавання для {l}. Параметри, Час і мова, Мова: додайте мову з компонентом \"Оптичне розпізнавання символів\".",
 };
 
 static TABLE: Table<S> = Table { en: &EN, ru: &RU, uk: &UK };

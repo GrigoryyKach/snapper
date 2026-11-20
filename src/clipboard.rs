@@ -9,6 +9,7 @@ use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenC
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 
 const CF_DIB: u32 = 8;
+const CF_UNICODETEXT: u32 = 13;
 
 /// 40-byte BITMAPINFOHEADER followed by bottom-up 32-bit BGRA rows.
 pub fn build_dib(img: &Image) -> Vec<u8> {
@@ -75,6 +76,73 @@ pub fn copy_image(img: &Image) -> Result<(), String> {
         })();
         let _ = CloseClipboard();
         result
+    }
+}
+
+/// Puts plain text on the clipboard as `CF_UNICODETEXT` (line breaks become CRLF, as Windows expects).
+pub fn copy_text(text: &str) -> Result<(), String> {
+    let mut wide: Vec<u16> = Vec::with_capacity(text.len() + 8);
+    let mut prev_cr = false;
+    for c in text.chars() {
+        if c == '\n' && !prev_cr {
+            wide.push(13);
+        }
+        prev_cr = c == '\r';
+        let mut b = [0u16; 2];
+        wide.extend_from_slice(c.encode_utf16(&mut b));
+    }
+    wide.push(0);
+    let bytes: Vec<u8> = wide.iter().flat_map(|u| u.to_le_bytes()).collect();
+    unsafe {
+        let mut opened = false;
+        for _ in 0..25 {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !opened {
+            return Err("clipboard is busy".into());
+        }
+        let result = (|| {
+            EmptyClipboard().map_err(|e| e.to_string())?;
+            let h = global_from(&bytes).ok_or("out of memory")?;
+            if SetClipboardData(CF_UNICODETEXT, Some(HANDLE(h.0))).is_err() {
+                let _ = GlobalFree(Some(h));
+                return Err("SetClipboardData(CF_UNICODETEXT) failed".to_string());
+            }
+            Ok(())
+        })();
+        let _ = CloseClipboard();
+        result
+    }
+}
+
+/// The current plain text of the clipboard, if any (tests save and restore it with this).
+#[allow(dead_code)]
+pub fn read_text() -> Option<String> {
+    use windows::Win32::System::DataExchange::GetClipboardData;
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    unsafe {
+        OpenClipboard(None).ok()?;
+        let r = (|| {
+            let h = GetClipboardData(CF_UNICODETEXT).ok()?;
+            let hg = HGLOBAL(h.0);
+            let p = GlobalLock(hg) as *const u16;
+            if p.is_null() {
+                return None;
+            }
+            let mut n = 0;
+            while *p.add(n) != 0 {
+                n += 1;
+            }
+            let t = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+            let _ = GlobalUnlock(hg);
+            Some(t)
+        })();
+        let _ = CloseClipboard();
+        r
     }
 }
 
