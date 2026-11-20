@@ -136,7 +136,7 @@ pub fn run() -> i32 {
             return 1;
         };
 
-        let updater = Updater::new("snapper", "GrigoryyKach/snapper", env!("CARGO_PKG_VERSION"));
+        let updater = Updater::new("snapper", "GrigoryyKach/snapper", env!("CARGO_PKG_VERSION")).exit_with(exit_resident);
         let state = State {
             hwnd,
             cfg,
@@ -485,7 +485,7 @@ fn on_balloon_click() {
     match kind {
         BalloonKind::Saved(p) => sys::reveal_file(&p),
         BalloonKind::Update => {
-            if with(|s| s.updater.apply()).unwrap_or(false) {
+            if with(|s| s.updater.apply_if(s.cfg.save())).unwrap_or(false) {
                 quit();
             }
         }
@@ -719,7 +719,7 @@ fn show_menu(hwnd: HWND) {
                 });
             }
             ID_UPDATE => {
-                if with(|s| s.updater.apply()).unwrap_or(false) {
+                if with(|s| s.updater.apply_if(s.cfg.save())).unwrap_or(false) {
                     quit();
                 }
             }
@@ -751,6 +751,16 @@ fn open_settings() {
             s.settings = Some(child);
         }
     });
+}
+
+/// Called from the update thread once the new version is running: asks this process to quit by its normal path
+/// (the window procedure destroys the window, which removes the tray icon).
+fn exit_resident() {
+    if let Some(h) = sys::resident_window() {
+        unsafe {
+            let _ = PostMessageW(Some(h), windows::Win32::UI::WindowsAndMessaging::WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 fn quit() {

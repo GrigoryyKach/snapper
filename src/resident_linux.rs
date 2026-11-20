@@ -283,7 +283,7 @@ pub fn run(capture_on_start: bool) -> i32 {
         sys::log("tray icon could not be created");
     }
 
-    let updater = Updater::new("snapper", "GrigoryyKach/snapper", env!("CARGO_PKG_VERSION"));
+    let updater = Updater::new("snapper", "GrigoryyKach/snapper", env!("CARGO_PKG_VERSION")).exit_with(exit_resident);
     let mut st = State {
         cfg,
         lang,
@@ -388,7 +388,7 @@ fn poll(s: &mut State, ids: &mut Ids) -> bool {
         } else if id == ids.folder {
             sys::open_folder(&s.cfg.save_folder());
         } else if id == ids.update_to {
-            if s.updater.apply() {
+            if s.updater.apply_if(s.cfg.save()) {
                 return false;
             }
         } else if id == ids.check_now {
@@ -709,4 +709,9 @@ mod tests {
         let expect = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyS);
         assert_eq!(g.id(), expect.id());
     }
+}
+
+/// Called from the update thread once the new version is running: asks this process to quit by its normal path.
+fn exit_resident() {
+    crate::sys::send("quit");
 }

@@ -27,6 +27,8 @@ mod hotkey;
 mod i18n;
 #[allow(dead_code)]
 mod nimvoro;
+#[allow(dead_code)]
+mod selfupdate;
 #[cfg(windows)]
 mod ocr;
 #[cfg(windows)]
@@ -65,8 +67,11 @@ mod sys;
 mod sys;
 #[allow(dead_code)]
 mod theme;
+#[allow(dead_code)]
+mod update_ui;
 
 fn main() {
+    selfupdate::startup("snapper");
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--settings") {
         if settings::run().is_err() {

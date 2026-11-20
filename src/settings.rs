@@ -7,6 +7,7 @@ use crate::i18n::{self, Lang};
 use crate::nimvoro::{self, UpdateState, Updater};
 use crate::strings::{self, S};
 use crate::support;
+use crate::update_ui;
 use crate::sys;
 use crate::theme::{self, Btn, Pal, Seg};
 use eframe::egui::{self, Align, Color32, Frame, Layout, Margin, RichText, ScrollArea, Ui};
@@ -95,7 +96,9 @@ impl App {
             cfg.language = Some(lang.code().to_string());
             cfg.save();
         }
-        let updater = Updater::new("snapper", "GrigoryyKach/snapper", env!("CARGO_PKG_VERSION"));
+        let updater = Updater::new("snapper", "GrigoryyKach/snapper", env!("CARGO_PKG_VERSION"))
+            .before_restart(close_resident)
+            .relaunch_args(&[]);
         Self {
             cfg,
             lang,
@@ -260,21 +263,24 @@ impl App {
         let u = nimvoro::strings(self.lang);
         theme::card(p).inner_margin(Margin::same(12)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(RichText::new(u.available.replace("{v}", &version)).font(theme::medium(14.0)).color(p.text));
-                    theme::hint(ui, &u.you_have.replace("{v}", self.updater.current), p);
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if theme::button(ui, u.update_btn, Btn::Primary, p).clicked() {
-                        close_resident();
-                        if self.updater.apply() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            if !update_ui::progress(ui, &self.updater, self.lang, p) {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.label(RichText::new(u.available.replace("{v}", &version)).font(theme::medium(14.0)).color(p.text));
+                        theme::hint(ui, &u.you_have.replace("{v}", self.updater.current), p);
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if theme::button(ui, u.update_btn, Btn::Primary, p).clicked() {
+                            // `before_restart` stops the resident process; a self-update restarts it itself.
+                            let saved = self.cfg.save();
+                            if self.updater.apply_if(saved) {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
                         }
-                    }
+                    });
                 });
-            });
+            }
         });
         ui.add_space(8.0);
     }
@@ -438,15 +444,17 @@ impl App {
             self.cfg.check_updates = check;
             self.apply();
         }
-        ui.horizontal(|ui| {
-            theme::hint(ui, &self.updater.status_text(self.lang), p);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if !self.updater.is_checking() && theme::button(ui, u.check_now, Btn::Link, p).clicked() {
-                    let c = ui.ctx().clone();
-                    self.updater.check(move || c.request_repaint());
-                }
+        if !update_ui::progress(ui, &self.updater, self.lang, p) {
+            ui.horizontal(|ui| {
+                theme::hint(ui, &self.updater.status_text(self.lang), p);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if !self.updater.is_checking() && theme::button(ui, u.check_now, Btn::Link, p).clicked() {
+                        let c = ui.ctx().clone();
+                        self.updater.check(move || c.request_repaint());
+                    }
+                });
             });
-        });
+        }
     }
 
     fn interface_section(&mut self, ui: &mut Ui, p: &Pal) {
@@ -491,6 +499,14 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.updater.is_busy() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        // A self-update has started the new version: save and close by the normal path.
+        if self.updater.should_exit() {
+            self.cfg.save();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         self.poll();
         if self.recording || self.recording_scroll {
             self.record_step(ctx);

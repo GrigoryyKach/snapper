@@ -108,8 +108,9 @@ impl Config {
         cfg
     }
 
-    pub fn save(&self) {
-        let _ = self.save_to(&config_path());
+    /// Writes the settings. `false` if they could not be written.
+    pub fn save(&self) -> bool {
+        self.save_to(&config_path()).is_ok()
     }
 
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
